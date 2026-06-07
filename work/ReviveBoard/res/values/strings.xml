@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">平板智能时钟</string>
+    <string name="accessibility_desc">读取音乐通知和歌词文字，用于平板智能时钟音乐面板显示。</string>
+</resources>

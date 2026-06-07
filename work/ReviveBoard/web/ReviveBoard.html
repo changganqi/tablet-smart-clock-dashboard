@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>复活屏</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; font-family: Arial, "Microsoft YaHei", sans-serif; background: #f4f7f8; color: #18232a; }
+    body.night { background: #080a0f; color: #e5e7eb; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 16px; box-sizing: border-box; }
+    .top { display: table; width: 100%; }
+    .left, .right { display: table-cell; vertical-align: middle; }
+    .right { text-align: right; width: 180px; color: #54636b; }
+    .night .right, .night .muted { color: #9aa3af; }
+    #clock { font-size: 72px; line-height: 1; font-weight: 700; letter-spacing: 0; }
+    #date { font-size: 18px; margin-top: 8px; }
+    h2 { font-size: 20px; margin: 18px 0 8px; }
+    textarea, input { width: 100%; box-sizing: border-box; border: 1px solid #c6cfd4; border-radius: 6px; padding: 9px; font-size: 17px; background: #fff; color: #18232a; }
+    .night textarea, .night input { background: #12171e; color: #e5e7eb; border-color: #323942; }
+    textarea { height: 118px; resize: vertical; }
+    button { border: 0; border-radius: 6px; background: #0b7a75; color: #fff; font-size: 16px; min-height: 42px; padding: 0 12px; }
+    .danger { background: #b84a62; }
+    .night button { background: #287b9a; }
+    .night .danger { background: #a85f52; }
+    .row { display: table; width: 100%; border-spacing: 6px 4px; }
+    .cell { display: table-cell; vertical-align: middle; }
+    .grow { width: 100%; }
+    .timer { font-size: 52px; font-weight: 700; line-height: 1.1; }
+    .checks label { display: inline-block; width: 24%; min-width: 92px; font-size: 17px; padding: 8px 0; }
+    .toggle { display: inline-block; margin-left: 12px; font-size: 16px; }
+    @media (max-width: 620px) {
+      #clock { font-size: 48px; }
+      .left, .right { display: block; width: auto; text-align: left; }
+      .right { margin-top: 10px; }
+      .cell { display: block; width: 100%; margin-bottom: 6px; }
+      button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="left">
+        <div id="clock">00:00:00</div>
+        <div id="date" class="muted"></div>
+      </div>
+      <div class="right">
+        <span class="toggle"><input id="night" type="checkbox"> 夜间</span>
+      </div>
+    </div>
+
+    <h2>番茄钟</h2>
+    <div class="row">
+      <div class="cell grow"><div id="timer" class="timer">25:00</div></div>
+      <div class="cell"><button id="start">开始</button></div>
+      <div class="cell"><button id="reset" class="danger">重置</button></div>
+      <div class="cell"><button id="work">25分</button></div>
+      <div class="cell"><button id="rest">5分</button></div>
+    </div>
+
+    <h2>今日便签</h2>
+    <textarea id="note"></textarea>
+
+    <h2>今日四格</h2>
+    <div class="checks">
+      <label><input class="daycheck" type="checkbox"> 喝水</label>
+      <label><input class="daycheck" type="checkbox"> 走动</label>
+      <label><input class="daycheck" type="checkbox"> 读书</label>
+      <label><input class="daycheck" type="checkbox"> 收拾</label>
+    </div>
+
+    <h2>快捷入口</h2>
+    <div id="links"></div>
+  </div>
+
+  <script>
+    (function () {
+      var defaults = [
+        ["百度", "https://m.baidu.com"],
+        ["天气", "https://m.baidu.com/s?word=%E5%A4%A9%E6%B0%94"],
+        ["B站", "https://m.bilibili.com"]
+      ];
+      var clock = document.getElementById("clock");
+      var date = document.getElementById("date");
+      var timer = document.getElementById("timer");
+      var start = document.getElementById("start");
+      var note = document.getElementById("note");
+      var night = document.getElementById("night");
+      var checks = document.getElementsByClassName("daycheck");
+      var preset = 25;
+      var remain = preset * 60 * 1000;
+      var running = false;
+      var endAt = 0;
+
+      function pad(n) { return n < 10 ? "0" + n : "" + n; }
+      function todayKey() {
+        var d = new Date();
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+      }
+      function save() {
+        localStorage.setItem("rb_note", note.value);
+        localStorage.setItem("rb_night", night.checked ? "1" : "0");
+        localStorage.setItem("rb_day", todayKey());
+        for (var i = 0; i < checks.length; i++) localStorage.setItem("rb_check_" + i, checks[i].checked ? "1" : "0");
+        var titles = document.getElementsByClassName("linkTitle");
+        var urls = document.getElementsByClassName("linkUrl");
+        for (var j = 0; j < titles.length; j++) {
+          localStorage.setItem("rb_title_" + j, titles[j].value);
+          localStorage.setItem("rb_url_" + j, urls[j].value);
+        }
+      }
+      function load() {
+        note.value = localStorage.getItem("rb_note") || "";
+        night.checked = localStorage.getItem("rb_night") === "1";
+        applyNight();
+        var storedDay = localStorage.getItem("rb_day") || todayKey();
+        for (var i = 0; i < checks.length; i++) checks[i].checked = storedDay === todayKey() && localStorage.getItem("rb_check_" + i) === "1";
+      }
+      function applyNight() { document.body.className = night.checked ? "night" : ""; }
+      function tickClock() {
+        var d = new Date();
+        clock.innerHTML = pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+        date.innerHTML = d.getFullYear() + "年" + (d.getMonth() + 1) + "月" + d.getDate() + "日";
+      }
+      function showTimer() {
+        var total = Math.max(0, Math.ceil(remain / 1000));
+        timer.innerHTML = pad(Math.floor(total / 60)) + ":" + pad(total % 60);
+        start.innerHTML = running ? "暂停" : "开始";
+      }
+      function tickTimer() {
+        if (running) {
+          remain = Math.max(0, endAt - new Date().getTime());
+          if (remain <= 0) {
+            running = false;
+            try { navigator.vibrate && navigator.vibrate([120, 80, 120]); } catch (e) {}
+          }
+          showTimer();
+        }
+      }
+      function buildLinks() {
+        var wrap = document.getElementById("links");
+        for (var i = 0; i < defaults.length; i++) {
+          var title = localStorage.getItem("rb_title_" + i) || defaults[i][0];
+          var url = localStorage.getItem("rb_url_" + i) || defaults[i][1];
+          var row = document.createElement("div");
+          row.className = "row";
+          row.innerHTML = '<div class="cell"><input class="linkTitle" value="' + title.replace(/"/g, "&quot;") + '"></div>' +
+            '<div class="cell grow"><input class="linkUrl" value="' + url.replace(/"/g, "&quot;") + '"></div>' +
+            '<div class="cell"><button data-i="' + i + '">打开</button></div>';
+          wrap.appendChild(row);
+        }
+        var btns = wrap.getElementsByTagName("button");
+        for (var b = 0; b < btns.length; b++) btns[b].onclick = function () {
+          var urls = document.getElementsByClassName("linkUrl");
+          var value = urls[parseInt(this.getAttribute("data-i"), 10)].value;
+          if (value.indexOf("://") < 0) value = "https://" + value;
+          save();
+          location.href = value;
+        };
+      }
+      buildLinks();
+      load();
+      note.oninput = save;
+      night.onchange = function () { applyNight(); save(); };
+      for (var c = 0; c < checks.length; c++) checks[c].onchange = save;
+      document.getElementById("start").onclick = function () {
+        if (running) {
+          remain = Math.max(0, endAt - new Date().getTime());
+          running = false;
+        } else {
+          if (remain <= 0) remain = preset * 60 * 1000;
+          endAt = new Date().getTime() + remain;
+          running = true;
+        }
+        showTimer();
+      };
+      document.getElementById("reset").onclick = function () { running = false; remain = preset * 60 * 1000; showTimer(); };
+      document.getElementById("work").onclick = function () { preset = 25; running = false; remain = preset * 60 * 1000; showTimer(); };
+      document.getElementById("rest").onclick = function () { preset = 5; running = false; remain = preset * 60 * 1000; showTimer(); };
+      setInterval(function () { tickClock(); tickTimer(); }, 500);
+      tickClock();
+      showTimer();
+    })();
+  </script>
+</body>
+</html>

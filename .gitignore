@@ -1,0 +1,20 @@
+# local build output
+build/
+*.class
+*.dex
+*.jar
+
+# Android/manual build leftovers
+*.idsig
+*.ap_
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+
+# Keep only the generated APKs that are intentionally published in outputs/
+outputs/*
+!outputs/
+!outputs/*.apk
