@@ -16,6 +16,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -34,6 +35,7 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.Icon;
+import android.graphics.drawable.StateListDrawable;
 import android.media.AudioManager;
 import android.media.MediaDescription;
 import android.media.session.MediaController;
@@ -57,6 +59,7 @@ import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -64,6 +67,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
@@ -77,6 +81,16 @@ import android.widget.RemoteViews;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.webkit.WebChromeClient;
+import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceError;
+import android.webkit.WebStorage;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -97,6 +111,7 @@ import java.net.URLEncoder;
 
 public class MainActivity extends Activity {
     private static final int REQ_LOCATION = 71;
+    private static final String PREF_NOTIFY_ACCESS_HINT_SHOWN = "notify_access_hint_shown_v2";
     private static final String TAG = "ReviveBoard";
     private static final int BG_TOP = Color.rgb(5, 8, 22);
     private static final int BG_BOTTOM = Color.rgb(13, 16, 38);
@@ -157,11 +172,36 @@ public class MainActivity extends Activity {
     private Button startPauseButton;
     private Button zoomStartPauseButton;
     private FrameLayout zoomOverlay;
+    private FrameLayout browserOverlay;
+    private WebView browserWebView;
+    private EditText browserAddressEdit;
+    private Button browserDesktopButton;
+    private Button browserTabsButton;
+    private LinearLayout browserTopBar;
+    private LinearLayout browserBottomBar;
+    private boolean browserDesktopMode;
+    private boolean browserModeLoaded;
+    private boolean browserNightMode;
+    private boolean browserOpen;
+    private boolean browserVideoExpanded;
+    private String browserCurrentUrl = "https://www.baidu.com";
+    private final List<String> browserTabUrls = new ArrayList<String>();
+    private final List<String> browserTabTitles = new ArrayList<String>();
+    private final List<Bitmap> browserTabSnapshots = new ArrayList<Bitmap>();
+    private int browserTabIndex;
+    private int browserZoomPercent = 100;
+    private boolean browserTabsPanelOpen;
+    private final List<String> pendingBookmarkDeletes = new ArrayList<String>();
+    private String browserMobileUserAgent = "";
+    private View browserCustomView;
+    private WebChromeClient.CustomViewCallback browserCustomViewCallback;
     private LinearLayout dockView;
     private AmbientBackgroundView ambientBackgroundView;
     private AmbientBackgroundView zoomBackgroundView;
     private MediaPlayer alertPlayer;
     private boolean alertActive;
+    private boolean notificationHintShowing;
+    private String activeZoomMode = "";
 
     private boolean timerRunning;
     private boolean timerRestMode;
@@ -180,6 +220,7 @@ public class MainActivity extends Activity {
     private String musicTitle = "正在播放";
     private String musicArtist = "";
     private Bitmap musicArtBitmap;
+    private String currentMusicPackage = "";
     private static volatile String latestLyricText = "";
     private static volatile long latestLyricAt;
     private static volatile String latestNotifyTitle = "";
@@ -191,6 +232,9 @@ public class MainActivity extends Activity {
     private static volatile long latestNotifyArtAt;
     private static volatile long latestNotifyAt;
     private static volatile int latestNotifyPlayback = -1;
+    private static final String[] MUSIC_PACKAGE_HINTS = new String[] {
+            "qqmusic", "kugou", "netease", "kuwo", "music", "player", "audio"
+    };
     private int themeIndex = 0;
     private volatile String weatherTitle = "天气加载中";
     private volatile String weatherDetail = "定位或网络不可用时会自动回退";
@@ -200,6 +244,19 @@ public class MainActivity extends Activity {
     private volatile boolean networkTimeReady;
     private volatile boolean syncInFlight;
     private volatile String timeSourceLabel = "系统时间";
+
+    private boolean compactLandscape() {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        return metrics.widthPixels > metrics.heightPixels
+                && metrics.heightPixels <= dp(430);
+    }
+
+    private boolean isTabletDevice() {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float widthDp = metrics.widthPixels / Math.max(1f, metrics.density);
+        float heightDp = metrics.heightPixels / Math.max(1f, metrics.density);
+        return Math.min(widthDp, heightDp) >= 600f;
+    }
 
     private final BroadcastReceiver batteryReceiver = new BroadcastReceiver() {
         @Override
@@ -220,22 +277,26 @@ public class MainActivity extends Activity {
     private final Runnable tick = new Runnable() {
         @Override
         public void run() {
-            updateClock();
             updateTimer();
-            if (musicTitleView != null && SystemClock.elapsedRealtime() - lastMusicProbeAt > 8000) {
-                updateMusicFromSession();
+            if (!browserOpen) {
+                updateClock();
+                if (musicTitleView != null && SystemClock.elapsedRealtime() - lastMusicProbeAt > 8000) {
+                    updateMusicFromSession();
+                }
+                if (musicTitleView != null || musicInfoView != null) {
+                    updateMusicUi();
+                }
             }
-            if (musicTitleView != null || musicInfoView != null) {
-                updateMusicUi();
-            }
-            handler.postDelayed(this, zoomMillisView != null ? 60 : 500);
+            handler.postDelayed(this, browserOpen ? 1500 : (zoomMillisView != null ? 60 : 500));
         }
     };
 
     private final Runnable weatherAutoRefresh = new Runnable() {
         @Override
         public void run() {
-            refreshWeather(false);
+            if (!browserOpen) {
+                refreshWeather(false);
+            }
             handler.postDelayed(this, 30L * 60L * 1000L);
         }
     };
@@ -260,6 +321,7 @@ public class MainActivity extends Activity {
             getWindow().setStatusBarColor(Color.TRANSPARENT);
             getWindow().setNavigationBarColor(Color.rgb(5, 8, 22));
         }
+        installImmersiveGuard();
 
         loadThemeImage();
         buildUi();
@@ -270,6 +332,9 @@ public class MainActivity extends Activity {
         updateClock();
         updateTimerText();
         probeMusicNowAndSoon();
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { maybeShowNotificationAccessHint(false); }
+        }, 1100);
         mainLayout.requestFocus();
         hideKeyboard();
         registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
@@ -292,6 +357,12 @@ public class MainActivity extends Activity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         saveState();
+        String restoreZoom = activeZoomMode;
+        boolean restoreBrowser = browserOpen;
+        String restoreUrl = currentBrowserUrl();
+        detachBrowserForRebuild();
+        zoomOverlay = null;
+        activeZoomMode = "";
         buildUi();
         rebindThemeSoon();
         loadState();
@@ -300,12 +371,20 @@ public class MainActivity extends Activity {
         updateClock();
         updateTimerText();
         probeMusicNowAndSoon();
+        if (restoreZoom.length() > 0) {
+            showZoom(restoreZoom);
+        }
+        if (restoreBrowser) {
+            showBrowser(restoreUrl.length() > 0 ? restoreUrl : "https://www.baidu.com");
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        probeMusicNowAndSoon();
+        if (!browserOpen) {
+            probeMusicNowAndSoon();
+        }
     }
 
     @Override
@@ -321,6 +400,8 @@ public class MainActivity extends Activity {
         stopAlert();
         handler.removeCallbacks(tick);
         handler.removeCallbacks(weatherAutoRefresh);
+        recycleBrowserSnapshots();
+        browserTabSnapshots.clear();
         try {
             unregisterReceiver(batteryReceiver);
         } catch (IllegalArgumentException ignored) {
@@ -329,7 +410,17 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (zoomOverlay != null) {
+        if (browserCustomView != null) {
+            hideBrowserCustomView();
+        } else if (browserVideoExpanded) {
+            exitInjectedVideoFullscreen();
+        } else if (browserOverlay != null) {
+            if (browserWebView != null && browserWebView.canGoBack()) {
+                browserWebView.goBack();
+            } else {
+                closeBrowser();
+            }
+        } else if (zoomOverlay != null) {
             closeZoom();
         } else {
             super.onBackPressed();
@@ -453,23 +544,26 @@ public class MainActivity extends Activity {
     private LinearLayout header() {
         LinearLayout header = row();
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setClickable(true);
-        header.setOnClickListener(new View.OnClickListener() {
+
+        LinearLayout weatherArea = row();
+        weatherArea.setGravity(Gravity.CENTER_VERTICAL);
+        weatherArea.setClickable(true);
+        weatherArea.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { showWeatherDialog(); }
         });
-
         weatherIconView = new WeatherIconView(this);
         weatherIconView.setWeatherCode(weatherCode);
         LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(48), dp(48));
         markParams.setMargins(0, 0, dp(12), 0);
-        header.addView(weatherIconView, markParams);
+        weatherArea.addView(weatherIconView, markParams);
 
         LinearLayout titles = column();
         weatherMainView = text(weatherTitle, 24, Typeface.BOLD, TEXT);
         weatherSubView = text(weatherDetail, 13, Typeface.NORMAL, MUTED);
         titles.addView(weatherMainView, matchWrap());
         titles.addView(weatherSubView, matchWrap());
-        header.addView(titles, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        weatherArea.addView(titles, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        header.addView(weatherArea, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         updateWeatherText();
 
         LinearLayout status = column();
@@ -477,16 +571,47 @@ public class MainActivity extends Activity {
         batteryView = text("--%", 17, Typeface.BOLD, CYAN);
         batteryView.setGravity(Gravity.RIGHT);
         updateBatteryText();
-        TextView device = text("Android 8.0", 12, Typeface.NORMAL, MUTED);
-        device.setGravity(Gravity.RIGHT);
         status.addView(batteryView, matchWrap());
-        status.addView(device, matchWrap());
+        String systemName = systemVersionLabel();
+        if (systemName.length() > 0) {
+            TextView device = text(systemName, 12, Typeface.NORMAL, MUTED);
+            device.setGravity(Gravity.RIGHT);
+            status.addView(device, matchWrap());
+        }
         header.addView(status, new LinearLayout.LayoutParams(dp(132), LinearLayout.LayoutParams.WRAP_CONTENT));
         return header;
     }
 
+    private String systemVersionLabel() {
+        try {
+            String release = Build.VERSION.RELEASE;
+            if (release == null || release.trim().length() == 0) {
+                return "";
+            }
+            return "Android " + release.trim();
+        } catch (Exception ex) {
+            return "";
+        }
+    }
+
     private LinearLayout clockPanel(boolean wide) {
         LinearLayout panel = panel("极简翻页时钟", "", CYAN);
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float scaledDensity = Math.max(1f, metrics.scaledDensity);
+        int screenW = Math.max(1, metrics.widthPixels);
+        int screenH = Math.max(1, metrics.heightPixels);
+        int clockPanelW = wide
+                ? Math.max(dp(220), Math.round(screenW * 0.28f))
+                : Math.max(dp(220), screenW - dp(72));
+        int usableW = Math.max(dp(160), clockPanelW - dp(36));
+        int tileMargin = Math.max(dp(2), Math.min(dp(4), usableW / 150));
+        int tileW = Math.max(dp(54), Math.min(dp(104), (usableW - tileMargin * 4) / 2));
+        int targetH = Math.round(tileW * 0.70f);
+        int maxH = wide ? Math.max(dp(54), Math.round(screenH * 0.14f)) : dp(74);
+        int tileH = Math.max(dp(44), Math.min(dp(74), Math.min(targetH, maxH)));
+        float digitSp = Math.max(30f, Math.min(58f, Math.min(tileW / scaledDensity * 0.58f, tileH / scaledDensity * 0.76f)));
+        float dateSp = Math.max(13f, Math.min(17f, screenW / scaledDensity / 24f));
+        float statusSp = Math.max(11f, Math.min(14f, screenW / scaledDensity / 30f));
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         grid.setRowCount(3);
@@ -495,14 +620,16 @@ public class MainActivity extends Activity {
         grid.setPadding(0, dp(8), 0, dp(8));
         digitViews = new TextView[6];
         for (int i = 0; i < digitViews.length; i++) {
-            TextView digit = flipDigit("0", 58);
+            TextView digit = flipDigit("0", digitSp);
             digit.setGravity(Gravity.CENTER);
             digit.setIncludeFontPadding(false);
+            digit.setMinWidth(0);
+            digit.setMinimumWidth(0);
             digitViews[i] = digit;
             GridLayout.LayoutParams p = new GridLayout.LayoutParams();
-            p.width = dp(104);
-            p.height = dp(74);
-            p.setMargins(dp(4), dp(5), dp(4), dp(5));
+            p.width = tileW;
+            p.height = tileH;
+            p.setMargins(tileMargin, dp(5), tileMargin, dp(5));
             grid.addView(digit, p);
         }
         LinearLayout.LayoutParams gridParams = new LinearLayout.LayoutParams(
@@ -511,11 +638,11 @@ public class MainActivity extends Activity {
         gridParams.gravity = Gravity.CENTER_HORIZONTAL;
         panel.addView(grid, gridParams);
 
-        dateView = text("", 17, Typeface.NORMAL, MUTED);
+        dateView = text("", dateSp, Typeface.NORMAL, MUTED);
         dateView.setPadding(0, dp(4), 0, dp(4));
         panel.addView(dateView, matchWrap());
 
-        clockStatusView = text("", 14, Typeface.NORMAL, MUTED);
+        clockStatusView = text("", statusSp, Typeface.NORMAL, MUTED);
         clockStatusView.setPadding(dp(12), dp(9), dp(12), dp(9));
         clockStatusView.setBackground(inputBg());
         panel.addView(clockStatusView, matchWrap());
@@ -659,14 +786,14 @@ public class MainActivity extends Activity {
         settingsChip.setOnLongClickListener(new View.OnLongClickListener() {
             @Override
             public boolean onLongClick(View v) {
-                openNotificationAccessSettings();
+                maybeShowNotificationAccessHint(true);
                 return true;
             }
         });
         browserChip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                openUri("https://m.baidu.com");
+                openUri("https://www.baidu.com");
             }
         });
         themeChip.setOnClickListener(new View.OnClickListener() {
@@ -709,9 +836,18 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout musicCard(boolean large) {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        boolean portrait = metrics.heightPixels > metrics.widthPixels;
+        boolean compact = compactLandscape();
+        int artSize = large
+                ? (compact ? Math.max(dp(72), Math.min(dp(92), metrics.heightPixels / 3))
+                        : (portrait ? Math.max(dp(82), Math.min(dp(112), metrics.widthPixels / 4)) : dp(126)))
+                : dp(70);
+        int horizontalPadding = large && (portrait || compact) ? dp(compact ? 8 : 9) : dp(large ? 12 : 8);
+        int verticalPadding = large && (portrait || compact) ? dp(compact ? 7 : 8) : dp(large ? 9 : 7);
         LinearLayout card = row();
         card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(dp(large ? 12 : 8), dp(large ? 9 : 7), dp(large ? 12 : 8), dp(large ? 9 : 7));
+        card.setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
         card.setBackground(inputBg());
 
         AlbumArtView art = new AlbumArtView(this);
@@ -722,7 +858,7 @@ public class MainActivity extends Activity {
         });
         art.setOnLongClickListener(new View.OnLongClickListener() {
             @Override public boolean onLongClick(View v) {
-                openNotificationAccessSettings();
+                maybeShowNotificationAccessHint(true);
                 return true;
             }
         });
@@ -731,13 +867,13 @@ public class MainActivity extends Activity {
             musicArtView = art;
         }
         LinearLayout.LayoutParams artParams = new LinearLayout.LayoutParams(
-                dp(large ? 126 : 70), dp(large ? 126 : 70));
-        artParams.setMargins(0, 0, dp(large ? 14 : 9), 0);
+                artSize, artSize);
+        artParams.setMargins(0, 0, large && (portrait || compact) ? dp(compact ? 8 : 9) : dp(large ? 14 : 9), 0);
         card.addView(art, artParams);
 
         LinearLayout info = column();
-        TextView title = marqueeText(musicTitleForUi(), large ? 23 : 15, Typeface.BOLD, TEXT);
-        TextView subtitle = marqueeText(musicSubtitleForUi(), large ? 15 : 12, Typeface.NORMAL, MUTED);
+        TextView title = marqueeText(musicTitleForUi(), large ? (compact ? 18 : (portrait ? 19 : 23)) : 15, Typeface.BOLD, TEXT);
+        TextView subtitle = marqueeText(musicSubtitleForUi(), large ? (compact ? 12 : (portrait ? 13 : 15)) : 12, Typeface.NORMAL, MUTED);
         musicTitleViews.add(title);
         musicSubViews.add(subtitle);
         if (!large) {
@@ -746,7 +882,7 @@ public class MainActivity extends Activity {
         }
         info.addView(title, matchWrap());
         info.addView(subtitle, matchWrap());
-        addPanelGap(info, large ? 13 : 4);
+        addPanelGap(info, large ? (compact ? 7 : (portrait ? 8 : 13)) : 4);
 
         LinearLayout controls = row();
         IconButton prev = new IconButton(this, IconButton.PREVIOUS, BLUE);
@@ -798,8 +934,12 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams iconParams(boolean large) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(large ? 52 : 30), dp(large ? 52 : 30));
-        p.setMargins(0, 0, dp(large ? 10 : 5), 0);
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        boolean portrait = metrics.heightPixels > metrics.widthPixels;
+        boolean compact = compactLandscape();
+        int size = large ? (compact ? dp(38) : (portrait ? dp(42) : dp(52))) : dp(30);
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(size, size);
+        p.setMargins(0, 0, large && (portrait || compact) ? dp(compact ? 5 : 6) : dp(large ? 10 : 5), 0);
         return p;
     }
 
@@ -811,18 +951,32 @@ public class MainActivity extends Activity {
     }
 
     private void probeMusicSoon() {
+        if (browserOpen) {
+            return;
+        }
         handler.postDelayed(new Runnable() {
-            @Override public void run() { updateMusicFromSession(); }
+            @Override public void run() {
+                if (!browserOpen) {
+                    updateMusicFromSession();
+                }
+            }
         }, 420);
     }
 
     private void probeMusicNowAndSoon() {
+        if (browserOpen) {
+            return;
+        }
         updateMusicUi();
         updateMusicFromSession(true);
         int[] delays = new int[] { 150, 600, 1500 };
         for (int i = 0; i < delays.length; i++) {
             handler.postDelayed(new Runnable() {
-                @Override public void run() { updateMusicFromSession(true); }
+                @Override public void run() {
+                    if (!browserOpen) {
+                        updateMusicFromSession(true);
+                    }
+                }
             }, delays[i]);
         }
     }
@@ -883,6 +1037,9 @@ public class MainActivity extends Activity {
         if (notify.length() > 0 && !sameText(musicTitleForUi(), notify) && notify.indexOf("酷狗") < 0) {
             return firstLine(notify);
         }
+        if (!isNotificationAccessEnabled() && Build.VERSION.SDK_INT >= 21) {
+            return "长按专辑图开启通知读取";
+        }
         return "";
     }
 
@@ -921,6 +1078,9 @@ public class MainActivity extends Activity {
             if (best != null && bestScore > 0) {
                 MediaController controller = best;
                 sessionPackage = controller.getPackageName();
+                if (sessionPackage != null && sessionPackage.length() > 0) {
+                    currentMusicPackage = sessionPackage;
+                }
                 MediaMetadata metadata = controller.getMetadata();
                 if (metadata != null) {
                     applyMediaMetadata(metadata);
@@ -936,11 +1096,16 @@ public class MainActivity extends Activity {
             }
         } catch (SecurityException ex) {
             // Active media sessions require notification access on some Android builds.
+            maybeShowNotificationAccessHint(false);
         } catch (Exception ignored) {
         }
         if (latestNotifyAt > 0
                 && System.currentTimeMillis() - latestNotifyAt < 10L * 60L * 1000L
                 && shouldApplyLatestNotification(sessionPackage, gotMetadata)) {
+            if (latestNotifyPackage != null && latestNotifyPackage.length() > 0
+                    && !isSystemNotificationPackage(latestNotifyPackage)) {
+                currentMusicPackage = latestNotifyPackage;
+            }
             if (latestNotifyTitle != null && latestNotifyTitle.length() > 0) {
                 musicTitle = latestNotifyTitle;
             }
@@ -1006,6 +1171,9 @@ public class MainActivity extends Activity {
             String pkg = controller.getPackageName();
             if (pkg != null && pkg.startsWith("com.android.server")) {
                 score -= 30;
+            }
+            if (isKnownMusicPackage(pkg)) {
+                score += 28;
             }
             if (pkg != null && latestNotifyPackage != null && pkg.equals(latestNotifyPackage)) {
                 score += 18;
@@ -1082,6 +1250,19 @@ public class MainActivity extends Activity {
         return text != null && text.toString().trim().length() > 0;
     }
 
+    private static boolean isKnownMusicPackage(String pkg) {
+        if (pkg == null) {
+            return false;
+        }
+        String lower = pkg.toLowerCase(Locale.US);
+        for (int i = 0; i < MUSIC_PACKAGE_HINTS.length; i++) {
+            if (lower.indexOf(MUSIC_PACKAGE_HINTS[i]) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void loadState() {
         if (keepAwakeChip != null) {
             keepAwakeChip.setChecked(prefs.getBoolean("keep_awake", true));
@@ -1094,25 +1275,41 @@ public class MainActivity extends Activity {
             noteEdit.clearFocus();
         }
 
-        String[] titles = {"百度", "B站", "股票"};
-        String[] urls = {"https://m.baidu.com", "https://www.bilibili.com/", "https://q.10jqka.com.cn/"};
+        String[] titles = {"百度", "B站", "抖音"};
+        String[] urls = {"https://www.baidu.com", "https://www.bilibili.com/", "https://www.douyin.com/"};
         String oldTitle = prefs.getString("link_title_1", "");
         String oldUrl = prefs.getString("link_url_1", "");
         String oldTitle2 = prefs.getString("link_title_2", "");
         String oldUrl2 = prefs.getString("link_url_2", "");
+        String oldTitle0 = prefs.getString("link_title_0", "");
+        String oldUrl0 = prefs.getString("link_url_0", "");
+        boolean migrateOldBaiduLink = oldTitle0.indexOf("百度") >= 0
+                || oldTitle0.toLowerCase(Locale.US).indexOf("bing") >= 0
+                || oldUrl0.toLowerCase(Locale.US).indexOf("baidu") >= 0
+                || oldUrl0.toLowerCase(Locale.US).indexOf("bing") >= 0;
         boolean migrateOldWeatherLink = oldTitle.indexOf("天气") >= 0
                 || oldUrl.indexOf("du.cobm") >= 0
                 || oldUrl.toLowerCase(Locale.US).indexOf("weather") >= 0;
         boolean migrateOldHotLink = oldTitle2.indexOf("热榜") >= 0
-                || oldUrl2.toLowerCase(Locale.US).indexOf("tophub") >= 0;
+                || oldTitle2.indexOf("股票") >= 0
+                || oldUrl2.toLowerCase(Locale.US).indexOf("tophub") >= 0
+                || oldUrl2.toLowerCase(Locale.US).indexOf("10jqka") >= 0;
         for (int i = 0; i < linkTitleEdits.length; i++) {
-            boolean migrate = migrateOldWeatherLink || (i == 2 && migrateOldHotLink);
+            boolean migrate = (i == 0 && migrateOldBaiduLink)
+                    || migrateOldWeatherLink
+                    || (i == 2 && migrateOldHotLink);
             linkTitleEdits[i].setText(migrate
                     ? titles[i]
                     : prefs.getString("link_title_" + i, titles[i]));
             linkUrlEdits[i].setText(migrate
                     ? urls[i]
                     : prefs.getString("link_url_" + i, urls[i]));
+            if (migrate) {
+                prefs.edit()
+                        .putString("link_title_" + i, titles[i])
+                        .putString("link_url_" + i, urls[i])
+                        .apply();
+            }
         }
 
         String today = todayKey();
@@ -1256,35 +1453,61 @@ public class MainActivity extends Activity {
     }
 
     private View todoPanel() {
+        boolean compact = compactLandscape();
         LinearLayout wrap = column();
         wrap.setClickable(true);
 
         LinearLayout addRow = row();
         addRow.setGravity(Gravity.CENTER_VERTICAL);
         todoInput = compactEdit("添加待办");
+        todoInput.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        todoInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT);
+        todoInput.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override
+            public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                boolean isDone = actionId == EditorInfo.IME_ACTION_DONE
+                        || actionId == EditorInfo.IME_ACTION_NEXT
+                        || actionId == EditorInfo.IME_ACTION_GO
+                        || actionId == EditorInfo.IME_ACTION_SEND;
+                boolean isEnter = event != null
+                        && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                        && event.getAction() == KeyEvent.ACTION_UP;
+                if (isDone || isEnter) {
+                    addTodoFromInput();
+                    hideKeyboard();
+                    todoInput.clearFocus();
+                    return true;
+                }
+                return false;
+            }
+        });
         Button add = actionButton("添加", GREEN);
-        addRow.addView(todoInput, new LinearLayout.LayoutParams(0, dp(48), 1f));
-        LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(dp(88), dp(48));
-        addParams.setMargins(dp(8), 0, 0, 0);
+        int rowH = compact ? dp(38) : dp(48);
+        addRow.addView(todoInput, new LinearLayout.LayoutParams(0, rowH, 1f));
+        LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(compact ? dp(72) : dp(88), rowH);
+        addParams.setMargins(compact ? dp(6) : dp(8), 0, 0, 0);
         addRow.addView(add, addParams);
         wrap.addView(addRow, matchWrap());
-        addPanelGap(wrap, 10);
+        addPanelGap(wrap, compact ? 6 : 10);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setBackground(inputBg());
         todoListView = column();
-        todoListView.setPadding(dp(10), dp(8), dp(10), dp(8));
+        todoListView.setPadding(compact ? dp(7) : dp(10), compact ? dp(5) : dp(8),
+                compact ? dp(7) : dp(10), compact ? dp(5) : dp(8));
         scroll.addView(todoListView, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
         wrap.addView(scroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        addPanelGap(wrap, 10);
+        addPanelGap(wrap, compact ? 6 : 10);
 
         Button clear = ghostButton("清空完成");
         wrap.addView(clear, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+                LinearLayout.LayoutParams.MATCH_PARENT, compact ? dp(38) : dp(48)));
 
         add.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { addTodoFromInput(); }
@@ -1300,11 +1523,12 @@ public class MainActivity extends Activity {
         if (todoListView == null) {
             return;
         }
+        boolean compact = compactLandscape();
         todoListView.removeAllViews();
         if (todoTexts.size() == 0) {
-            TextView empty = text("没有待办", 18, Typeface.BOLD, MUTED);
+            TextView empty = text("没有待办", compact ? 15 : 18, Typeface.BOLD, MUTED);
             empty.setGravity(Gravity.CENTER);
-            empty.setPadding(0, dp(34), 0, dp(34));
+            empty.setPadding(0, compact ? dp(18) : dp(34), 0, compact ? dp(18) : dp(34));
             todoListView.addView(empty, matchWrap());
             return;
         }
@@ -1313,7 +1537,7 @@ public class MainActivity extends Activity {
             boolean done = todoDone.get(i).booleanValue();
             LinearLayout item = row();
             item.setGravity(Gravity.CENTER_VERTICAL);
-            item.setPadding(dp(4), dp(7), dp(4), dp(7));
+            item.setPadding(dp(4), compact ? dp(4) : dp(7), dp(4), compact ? dp(4) : dp(7));
             item.setClickable(true);
             item.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { toggleTodo(index); }
@@ -1321,22 +1545,24 @@ public class MainActivity extends Activity {
 
             TodoCheckView check = new TodoCheckView(this);
             check.setChecked(done);
-            LinearLayout.LayoutParams checkParams = new LinearLayout.LayoutParams(dp(34), dp(34));
-            checkParams.setMargins(0, 0, dp(9), 0);
+            int checkSize = compact ? dp(26) : dp(34);
+            LinearLayout.LayoutParams checkParams = new LinearLayout.LayoutParams(checkSize, checkSize);
+            checkParams.setMargins(0, 0, compact ? dp(7) : dp(9), 0);
             item.addView(check, checkParams);
 
-            TextView label = marqueeText(todoTexts.get(i), 19, Typeface.BOLD, done ? MUTED : TEXT);
+            TextView label = marqueeText(todoTexts.get(i), compact ? 15 : 19, Typeface.BOLD, done ? MUTED : TEXT);
             if (done) {
                 label.setPaintFlags(label.getPaintFlags() | Paint.STRIKE_THRU_TEXT_FLAG);
             }
-            item.addView(label, new LinearLayout.LayoutParams(0, dp(36), 1f));
+            item.addView(label, new LinearLayout.LayoutParams(0, compact ? dp(28) : dp(36), 1f));
 
             Button delete = tinyButton("删除", RED);
             delete.setOnClickListener(new View.OnClickListener() {
                 @Override public void onClick(View v) { deleteTodo(index); }
             });
-            LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(dp(70), dp(38));
-            deleteParams.setMargins(dp(8), 0, 0, 0);
+            LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(compact ? dp(54) : dp(70),
+                    compact ? dp(30) : dp(38));
+            deleteParams.setMargins(compact ? dp(6) : dp(8), 0, 0, 0);
             item.addView(delete, deleteParams);
             todoListView.addView(item, matchWrap());
         }
@@ -1757,35 +1983,1530 @@ public class MainActivity extends Activity {
         if (value.indexOf("://") < 0) {
             value = "https://" + value;
         }
+        showBrowser(value);
+    }
+
+    private void showBrowser(String url) {
+        hideKeyboard();
+        if (rootView == null) {
+            return;
+        }
+        String value = url == null ? "" : url.trim();
+        if (value.length() == 0) {
+            value = "https://www.baidu.com";
+        }
+        if (value.indexOf("://") < 0) {
+            value = "https://" + value;
+        }
+        browserOpen = true;
+        browserCurrentUrl = value;
+        if (browserOverlay != null) {
+            updateCurrentBrowserTab(value, null);
+            if (browserAddressEdit != null) {
+                browserAddressEdit.setText(value);
+            }
+            if (browserWebView != null) {
+                browserWebView.loadUrl(value);
+            }
+            browserOverlay.bringToFront();
+            restoreImmersiveSoon();
+            return;
+        }
+        if (!browserModeLoaded && prefs != null) {
+            browserDesktopMode = prefs.getBoolean("browser_desktop", isTabletDevice());
+            browserNightMode = prefs.getBoolean("browser_night", false);
+            browserZoomPercent = prefs.getInt("browser_zoom_percent", 100);
+            browserModeLoaded = true;
+        }
+        browserOverlay = new FrameLayout(this);
+        browserOverlay.setClickable(true);
+        if (Build.VERSION.SDK_INT >= 21) {
+            browserOverlay.setElevation(dp(36));
+        }
+        ensureBrowserTabs(value);
+        applyBrowserShellNightMode();
+        if (dockView != null) {
+            dockView.setVisibility(View.GONE);
+        }
+
+        LinearLayout wrap = column();
+        wrap.setPadding(dp(10), dp(8), dp(10), dp(8));
+        browserOverlay.addView(wrap, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        LinearLayout bar = row();
+        browserTopBar = bar;
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        browserAddressEdit = browserEdit("输入网址或搜索");
+        browserAddressEdit.setText(value);
+        browserAddressEdit.setSelectAllOnFocus(false);
+        browserAddressEdit.setImeOptions(EditorInfo.IME_ACTION_GO);
+        boolean compact = getResources().getDisplayMetrics().widthPixels < dp(520);
+        int barH = compact ? dp(42) : dp(46);
+        int gap = compact ? dp(6) : dp(8);
+        bar.setPadding(0, 0, 0, 0);
+        bar.setBackgroundColor(Color.TRANSPARENT);
+        Button go = browserAccentButton("前往");
+        bar.addView(go, new LinearLayout.LayoutParams(compact ? dp(64) : dp(76), barH));
+        LinearLayout.LayoutParams addressParams = new LinearLayout.LayoutParams(0, barH, 1f);
+        addressParams.setMargins(gap, 0, gap, 0);
+        bar.addView(browserAddressEdit, addressParams);
+        Button closeTop = browserButton("刷新");
+        LinearLayout.LayoutParams closeTopParams = new LinearLayout.LayoutParams(compact ? dp(58) : dp(76), barH);
+        bar.addView(closeTop, closeTopParams);
+        wrap.addView(bar, matchWrap());
+        addPanelGap(wrap, 8);
+
+        browserWebView = new WebView(this);
+        browserWebView.setBackgroundColor(Color.WHITE);
+        browserWebView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        browserWebView.addJavascriptInterface(new BrowserVideoBridge(), "ReviveBrowser");
+        WebSettings settings = browserWebView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setAppCacheEnabled(true);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setSupportZoom(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        settings.setTextZoom(browserZoomPercent);
+        browserMobileUserAgent = settings.getUserAgentString();
+        applyBrowserDesktopMode();
+        if (Build.VERSION.SDK_INT >= 21) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        }
+        // 开启 Cookie（含第三方），B 站等站点需要登录态/会话才能稳定切换清晰度
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(value)));
-        } catch (Exception ex) {
-            Toast.makeText(this, "打不开这个入口", Toast.LENGTH_SHORT).show();
+            CookieManager cookieManager = CookieManager.getInstance();
+            cookieManager.setAcceptCookie(true);
+            if (Build.VERSION.SDK_INT >= 21) {
+                cookieManager.setAcceptThirdPartyCookies(browserWebView, true);
+            }
+        } catch (Exception ignored) {
+        }
+        browserWebView.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return handleBrowserUrl(view, url);
+            }
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (Build.VERSION.SDK_INT >= 21 && request != null && request.getUrl() != null) {
+                    return handleBrowserUrl(view, request.getUrl().toString());
+                }
+                return false;
+            }
+            @Override public void onPageFinished(WebView view, String url) {
+                if (browserAddressEdit != null && url != null) {
+                    browserAddressEdit.setText(url);
+                }
+                if (url != null && url.length() > 0) {
+                    browserCurrentUrl = url;
+                }
+                updateCurrentBrowserTab(url, view == null ? null : view.getTitle());
+                applyBrowserNightMode();
+                injectBrowserVideoFullscreen();
+                final String finishedUrl = url;
+                handler.postDelayed(new Runnable() {
+                    @Override public void run() { captureBrowserTabSnapshot(finishedUrl); }
+                }, 450);
+                restoreImmersiveSoon();
+            }
+            @Override public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                if (isBadBrowserScheme(failingUrl)) {
+                    view.stopLoading();
+                }
+                super.onReceivedError(view, errorCode, description, failingUrl);
+            }
+            @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (Build.VERSION.SDK_INT >= 23 && request != null && request.getUrl() != null
+                        && isBadBrowserScheme(request.getUrl().toString())) {
+                    view.stopLoading();
+                    return;
+                }
+                super.onReceivedError(view, request, error);
+            }
+            @Override public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                handleBrowserCrashed();
+                return true;
+            }
+        });
+        browserWebView.setWebChromeClient(new WebChromeClient() {
+            @Override public void onShowCustomView(View view, CustomViewCallback callback) {
+                showBrowserCustomView(view, callback);
+            }
+            @Override public void onHideCustomView() {
+                hideBrowserCustomView();
+            }
+        });
+        wrap.addView(browserWebView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        addPanelGap(wrap, 8);
+        LinearLayout nav = row();
+        browserBottomBar = nav;
+        nav.setGravity(Gravity.CENTER_VERTICAL);
+        nav.setPadding(0, 0, 0, 0);
+        nav.setBackgroundColor(Color.TRANSPARENT);
+        Button back = browserNavButton("‹");
+        Button forward = browserNavButton("›");
+        Button tabs = browserNavButton(String.valueOf(Math.max(1, browserTabUrls.size())));
+        browserTabsButton = tabs;
+        Button menu = browserNavButton("☰");
+        Button home = browserNavButton("⌂");
+        nav.addView(back, browserNavParams(true));
+        nav.addView(forward, browserNavParams(false));
+        nav.addView(tabs, browserNavParams(false));
+        nav.addView(menu, browserNavParams(false));
+        nav.addView(home, browserNavParams(false));
+        wrap.addView(nav, matchWrap());
+        applyBrowserShellNightMode();
+
+        View.OnClickListener loadListener = new View.OnClickListener() {
+            @Override public void onClick(View v) { loadBrowserAddress(); }
+        };
+        go.setOnClickListener(loadListener);
+        closeTop.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (browserWebView != null) {
+                    browserWebView.reload();
+                }
+                restoreImmersiveSoon();
+            }
+        });
+        browserAddressEdit.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                boolean goAction = actionId == EditorInfo.IME_ACTION_GO
+                        || actionId == EditorInfo.IME_ACTION_DONE;
+                boolean enter = event != null
+                        && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                        && event.getAction() == KeyEvent.ACTION_UP;
+                if (goAction || enter) {
+                    loadBrowserAddress();
+                    return true;
+                }
+                return false;
+            }
+        });
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (browserWebView != null && browserWebView.canGoBack()) {
+                    browserWebView.goBack();
+                }
+            }
+        });
+        forward.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (browserWebView != null && browserWebView.canGoForward()) {
+                    browserWebView.goForward();
+                }
+            }
+        });
+        tabs.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                showBrowserTabs();
+            }
+        });
+        menu.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                showBrowserMenu();
+            }
+        });
+        home.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { closeBrowser(); }
+        });
+
+        rootView.addView(browserOverlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        browserOverlay.bringToFront();
+        updateCurrentBrowserTab(value, null);
+        browserWebView.loadUrl(value);
+        restoreImmersiveSoon();
+    }
+
+    private void loadBrowserAddress() {
+        if (browserWebView == null || browserAddressEdit == null) {
+            return;
+        }
+        String value = browserAddressEdit.getText().toString().trim();
+        if (value.length() == 0) {
+            return;
+        }
+        if (value.indexOf("://") < 0) {
+            if (value.indexOf(".") > 0 && value.indexOf(" ") < 0) {
+                value = "https://" + value;
+            } else {
+                value = "https://www.baidu.com/s?wd=" + Uri.encode(value);
+            }
+        }
+        hideKeyboard();
+        browserCurrentUrl = value;
+        updateCurrentBrowserTab(value, null);
+        browserWebView.loadUrl(value);
+        restoreImmersiveSoon();
+    }
+
+    private void ensureBrowserTabs(String url) {
+        String value = url == null || url.trim().length() == 0 ? "https://www.baidu.com" : url.trim();
+        if (browserTabUrls.size() == 0) {
+            browserTabUrls.add(value);
+            browserTabTitles.add("百度");
+            browserTabSnapshots.add(null);
+            browserTabIndex = 0;
+            return;
+        }
+        if (browserTabIndex < 0 || browserTabIndex >= browserTabUrls.size()) {
+            browserTabIndex = 0;
+        }
+        browserTabUrls.set(browserTabIndex, value);
+    }
+
+    private void updateCurrentBrowserTab(String url, String title) {
+        if (browserTabsPanelOpen) {
+            return;
+        }
+        if (browserTabUrls.size() == 0) {
+            ensureBrowserTabs(url);
+        }
+        if (browserTabIndex < 0 || browserTabIndex >= browserTabUrls.size()) {
+            browserTabIndex = 0;
+        }
+        String value = url == null || url.trim().length() == 0 ? currentBrowserUrl() : url.trim();
+        if (value.length() > 0) {
+            browserTabUrls.set(browserTabIndex, value);
+            browserCurrentUrl = value;
+        }
+        String label = title == null ? "" : title.trim();
+        if (label.length() == 0) {
+            label = browserTitleFromUrl(value);
+        }
+        while (browserTabTitles.size() < browserTabUrls.size()) {
+            browserTabTitles.add("新分页");
+        }
+        while (browserTabSnapshots.size() < browserTabUrls.size()) {
+            browserTabSnapshots.add(null);
+        }
+        browserTabTitles.set(browserTabIndex, label);
+        if (browserTabsButton != null) {
+            browserTabsButton.setText(String.valueOf(Math.max(1, browserTabUrls.size())));
         }
     }
 
-    private void openMusicApp() {
-        String[] packages = new String[] {
-                "com.kugou.android",
-                "com.tencent.qqmusic",
-                "com.netease.cloudmusic"
+    private void captureBrowserTabSnapshot() {
+        captureBrowserTabSnapshot(currentBrowserUrl());
+    }
+
+    private void captureBrowserTabSnapshot(String expectedUrl) {
+        if (browserWebView == null || browserTabIndex < 0 || browserTabIndex >= browserTabUrls.size()) {
+            return;
+        }
+        if (browserTabsPanelOpen) {
+            return;
+        }
+        try {
+            String slotUrl = browserTabUrls.get(browserTabIndex);
+            String actualUrl = currentBrowserUrl();
+            if (expectedUrl != null && expectedUrl.length() > 0 && !expectedUrl.equals(slotUrl)) {
+                return;
+            }
+            if (actualUrl != null && actualUrl.length() > 0 && slotUrl != null
+                    && slotUrl.length() > 0 && !actualUrl.equals(slotUrl)) {
+                return;
+            }
+            int w = Math.max(1, browserWebView.getWidth());
+            int h = Math.max(1, browserWebView.getHeight());
+            if (w < dp(80) || h < dp(80)) {
+                return;
+            }
+            int targetW = Math.max(dp(180), Math.min(dp(360), w / 2));
+            int targetH = Math.max(dp(110), Math.min(dp(220), h / 2));
+            Bitmap bitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.RGB_565);
+            Canvas canvas = new Canvas(bitmap);
+            canvas.drawColor(Color.WHITE);
+            float scale = Math.min(targetW / (float) w, targetH / (float) h);
+            canvas.scale(scale, scale);
+            browserWebView.draw(canvas);
+            while (browserTabSnapshots.size() < browserTabUrls.size()) {
+                browserTabSnapshots.add(null);
+            }
+            Bitmap old = browserTabSnapshots.get(browserTabIndex);
+            if (old != null && old != bitmap && !old.isRecycled()) {
+                old.recycle();
+            }
+            browserTabSnapshots.set(browserTabIndex, bitmap);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String browserTitleFromUrl(String url) {
+        if (url == null || url.length() == 0) {
+            return "新分页";
+        }
+        try {
+            Uri uri = Uri.parse(url);
+            String host = uri.getHost();
+            if (host != null && host.length() > 0) {
+                return host.replace("www.", "");
+            }
+        } catch (Exception ignored) {
+        }
+        return url.length() > 28 ? url.substring(0, 28) : url;
+    }
+
+    private void showBrowserTabs() {
+        showBrowserTabs(true);
+    }
+
+    private void showBrowserTabs(boolean captureCurrent) {
+        if (captureCurrent && !browserTabsPanelOpen) {
+            updateCurrentBrowserTab(currentBrowserUrl(), browserWebView == null ? null : browserWebView.getTitle());
+            captureBrowserTabSnapshot();
+        }
+        browserTabsPanelOpen = true;
+
+        final FrameLayout shade = new FrameLayout(this);
+        shade.setBackgroundColor(Color.rgb(20, 26, 36));
+        shade.setClickable(true);
+        // 浏览器界面有 elevation=36，弹层必须更高，否则会被盖住导致“点了没反应”
+        if (Build.VERSION.SDK_INT >= 21) {
+            shade.setElevation(dp(60));
+        }
+
+        LinearLayout panel = column();
+        int pad = dp(14);
+        panel.setPadding(pad, dp(12), pad, dp(10));
+
+        // 顶部标题栏
+        LinearLayout head = row();
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = text("分页 (" + browserTabUrls.size() + ")", 20, Typeface.BOLD, Color.WHITE);
+        head.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        panel.addView(head, matchWrap());
+        addPanelGap(panel, 10);
+
+        // 卡片网格（两列），可滚动
+        ScrollView gridScroll = new ScrollView(this);
+        gridScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        LinearLayout grid = column();
+        int columns = 2;
+        int screenW = getResources().getDisplayMetrics().widthPixels;
+        int cardGap = dp(10);
+        int cardW = (screenW - pad * 2 - cardGap) / columns;
+        int cardH = (int) (cardW * 0.72f);
+        LinearLayout currentRow = null;
+        for (int i = 0; i < browserTabUrls.size(); i++) {
+            if (i % columns == 0) {
+                currentRow = row();
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                rowParams.setMargins(0, 0, 0, cardGap);
+                grid.addView(currentRow, rowParams);
+            }
+            View card = browserTabCard(i, shade, cardH);
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(cardW, cardH);
+            if (i % columns != 0) {
+                cardParams.setMargins(cardGap, 0, 0, 0);
+            }
+            currentRow.addView(card, cardParams);
+        }
+        gridScroll.addView(grid, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        panel.addView(gridScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        addPanelGap(panel, 8);
+        // 底部操作栏
+        LinearLayout actions = row();
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        Button add = browserAccentButton("+ 新建分页");
+        Button done = browserButton("完成");
+        actions.addView(add, new LinearLayout.LayoutParams(0, dp(46), 2f));
+        LinearLayout.LayoutParams doneParams = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        doneParams.setMargins(dp(10), 0, 0, 0);
+        actions.addView(done, doneParams);
+        panel.addView(actions, matchWrap());
+
+        shade.addView(panel, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        add.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                dismissBrowserTabs(shade);
+                newBrowserTab("https://www.baidu.com");
+            }
+        });
+        done.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { dismissBrowserTabs(shade); }
+        });
+        shade.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { dismissBrowserTabs(shade); }
+        });
+        panel.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { }
+        });
+        if (rootView != null) {
+            rootView.addView(shade, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            shade.bringToFront();
+        }
+        restoreImmersiveSoon();
+    }
+
+    private View browserTabCard(final int index, final FrameLayout shade, int cardH) {
+        boolean active = index == browserTabIndex;
+        final String tabUrl = index < browserTabUrls.size() ? browserTabUrls.get(index) : "";
+        FrameLayout card = new FrameLayout(this);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.WHITE);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(active ? 3 : 1), active ? Color.rgb(34, 197, 183) : Color.rgb(214, 222, 233));
+        card.setBackground(bg);
+        if (Build.VERSION.SDK_INT >= 21) {
+            card.setElevation(dp(4));
+            card.setClipToOutline(true);
+        }
+
+        Bitmap snapshot = index < browserTabSnapshots.size() ? browserTabSnapshots.get(index) : null;
+        if (snapshot != null && !snapshot.isRecycled()) {
+            SnapshotPreviewView preview = new SnapshotPreviewView(this, snapshot);
+            card.addView(preview, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+            View veil = new View(this);
+            veil.setBackgroundColor(Color.argb(72, 255, 255, 255));
+            card.addView(veil, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        }
+
+        LinearLayout body = column();
+        body.setPadding(dp(12), dp(12), dp(12), dp(12));
+
+        String t = index < browserTabTitles.size() ? browserTabTitles.get(index) : "";
+        String url = tabUrl;
+        if (t == null || t.trim().length() == 0) {
+            t = browserTitleFromUrl(url);
+        }
+        TextView titleView = text(browserShortText(t, 30), 15, Typeface.BOLD, Color.rgb(28, 38, 52));
+        titleView.setMaxLines(2);
+        titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        body.addView(titleView, matchWrap());
+        addPanelGap(body, 6);
+        TextView urlView = text(browserShortText(browserCompactUrl(url), 42), 12, Typeface.NORMAL, Color.rgb(118, 131, 151));
+        urlView.setMaxLines(2);
+        urlView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        body.addView(urlView, matchWrap());
+        card.addView(body, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        if (active) {
+            TextView badge = text("当前", 11, Typeface.BOLD, Color.WHITE);
+            badge.setGravity(Gravity.CENTER);
+            badge.setPadding(dp(8), dp(2), dp(8), dp(2));
+            GradientDrawable badgeBg = new GradientDrawable();
+            badgeBg.setColor(Color.rgb(34, 197, 183));
+            badgeBg.setCornerRadius(dp(8));
+            badge.setBackground(badgeBg);
+            FrameLayout.LayoutParams badgeParams = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM | Gravity.START);
+            badgeParams.setMargins(dp(12), 0, 0, dp(12));
+            card.addView(badge, badgeParams);
+        }
+
+        // 右上角关闭叉
+        TextView closeX = text("✕", 16, Typeface.BOLD, Color.rgb(120, 132, 150));
+        closeX.setGravity(Gravity.CENTER);
+        GradientDrawable xb = new GradientDrawable();
+        xb.setColor(Color.rgb(240, 243, 247));
+        xb.setShape(GradientDrawable.OVAL);
+        closeX.setBackground(xb);
+        int xs = dp(30);
+        FrameLayout.LayoutParams xParams = new FrameLayout.LayoutParams(xs, xs,
+                Gravity.TOP | Gravity.END);
+        xParams.setMargins(0, dp(8), dp(8), 0);
+        card.addView(closeX, xParams);
+
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                dismissBrowserTabs(shade);
+                switchBrowserTab(index);
+            }
+        });
+        closeX.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                removeOverlayOnly(shade);
+                closeBrowserTab(index, tabUrl);
+                Toast.makeText(MainActivity.this, "已关闭分页", Toast.LENGTH_SHORT).show();
+                showBrowserTabs(false);
+            }
+        });
+        return card;
+    }
+
+    private void dismissBrowserTabs(FrameLayout shade) {
+        removeOverlayOnly(shade);
+        browserTabsPanelOpen = false;
+        restoreImmersiveSoon();
+    }
+
+    private void removeOverlayOnly(FrameLayout shade) {
+        try {
+            if (rootView != null && shade != null) {
+                rootView.removeView(shade);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private View browserDivider() {
+        View v = new View(this);
+        v.setBackgroundColor(Color.rgb(231, 236, 244));
+        return v;
+    }
+
+    private String browserShortText(String value, int max) {
+        if (value == null) {
+            return "";
+        }
+        String clean = value.replace('\n', ' ').replace('\r', ' ').trim();
+        if (clean.length() <= max) {
+            return clean;
+        }
+        return clean.substring(0, Math.max(0, max - 1)) + "…";
+    }
+
+    private String browserCompactUrl(String value) {
+        if (value == null) {
+            return "";
+        }
+        try {
+            Uri uri = Uri.parse(value);
+            String host = uri.getHost();
+            String path = uri.getPath();
+            if (host != null && host.length() > 0) {
+                String clean = host.replace("www.", "");
+                if (path != null && path.length() > 1) {
+                    clean += path;
+                }
+                return clean;
+            }
+        } catch (Exception ignored) {
+        }
+        return value;
+    }
+
+    private void recycleBrowserSnapshots() {
+        for (int i = 0; i < browserTabSnapshots.size(); i++) {
+            Bitmap bitmap = browserTabSnapshots.get(i);
+            if (bitmap != null && !bitmap.isRecycled()) {
+                bitmap.recycle();
+            }
+        }
+    }
+
+    private void newBrowserTab(String url) {
+        String value = url == null || url.trim().length() == 0 ? "https://www.baidu.com" : url.trim();
+        captureBrowserTabSnapshot();
+        updateCurrentBrowserTab(currentBrowserUrl(), browserWebView == null ? null : browserWebView.getTitle());
+        browserTabUrls.add(value);
+        browserTabTitles.add("百度");
+        browserTabSnapshots.add(null);
+        browserTabIndex = browserTabUrls.size() - 1;
+        browserCurrentUrl = value;
+        if (browserAddressEdit != null) {
+            browserAddressEdit.setText(value);
+        }
+        if (browserWebView != null) {
+            browserWebView.loadUrl(value);
+        }
+        if (browserTabsButton != null) {
+            browserTabsButton.setText(String.valueOf(browserTabUrls.size()));
+        }
+        restoreImmersiveSoon();
+    }
+
+    private void switchBrowserTab(int index) {
+        switchBrowserTab(index, true);
+    }
+
+    private void switchBrowserTab(int index, boolean saveCurrent) {
+        if (index < 0 || index >= browserTabUrls.size()) {
+            return;
+        }
+        if (saveCurrent) {
+            captureBrowserTabSnapshot();
+            updateCurrentBrowserTab(currentBrowserUrl(), browserWebView == null ? null : browserWebView.getTitle());
+        }
+        browserTabIndex = index;
+        String url = browserTabUrls.get(index);
+        browserCurrentUrl = url;
+        if (browserAddressEdit != null) {
+            browserAddressEdit.setText(url);
+        }
+        if (browserWebView != null) {
+            browserWebView.loadUrl(url);
+        }
+        if (browserTabsButton != null) {
+            browserTabsButton.setText(String.valueOf(Math.max(1, browserTabUrls.size())));
+        }
+        restoreImmersiveSoon();
+    }
+
+    private void closeCurrentBrowserTab() {
+        closeBrowserTab(browserTabIndex);
+    }
+
+    private void closeBrowserTab(int index) {
+        closeBrowserTab(index, index >= 0 && index < browserTabUrls.size() ? browserTabUrls.get(index) : "");
+    }
+
+    private void closeBrowserTab(int index, String expectedUrl) {
+        if (browserTabUrls.size() <= 1) {
+            browserTabUrls.clear();
+            browserTabTitles.clear();
+            recycleBrowserSnapshots();
+            browserTabSnapshots.clear();
+            browserTabIndex = 0;
+            browserTabUrls.add("https://www.baidu.com");
+            browserTabTitles.add("百度");
+            browserTabSnapshots.add(null);
+            switchBrowserTab(0, false);
+            return;
+        }
+        if (index < 0 || index >= browserTabUrls.size()) {
+            index = browserTabIndex >= 0 && browserTabIndex < browserTabUrls.size() ? browserTabIndex : 0;
+        }
+        if (expectedUrl != null && expectedUrl.length() > 0
+                && (index < 0 || index >= browserTabUrls.size()
+                || !expectedUrl.equals(browserTabUrls.get(index)))) {
+            for (int i = 0; i < browserTabUrls.size(); i++) {
+                if (expectedUrl.equals(browserTabUrls.get(i))) {
+                    index = i;
+                    break;
+                }
+            }
+        }
+        browserTabUrls.remove(index);
+        if (index < browserTabTitles.size()) {
+            browserTabTitles.remove(index);
+        }
+        if (index < browserTabSnapshots.size()) {
+            Bitmap old = browserTabSnapshots.remove(index);
+            if (old != null && !old.isRecycled()) {
+                old.recycle();
+            }
+        }
+        if (browserTabIndex > index) {
+            browserTabIndex--;
+        } else if (browserTabIndex == index) {
+            browserTabIndex = Math.min(index, browserTabUrls.size() - 1);
+        }
+        if (browserTabIndex >= browserTabUrls.size()) {
+            browserTabIndex = browserTabUrls.size() - 1;
+        }
+        switchBrowserTab(browserTabIndex, false);
+    }
+
+    private void applyBrowserDesktopMode() {
+        if (browserWebView == null) {
+            return;
+        }
+        WebSettings settings = browserWebView.getSettings();
+        if (browserDesktopMode) {
+            settings.setUserAgentString("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36");
+            settings.setUseWideViewPort(true);
+            settings.setLoadWithOverviewMode(true);
+        } else {
+            settings.setUserAgentString(browserMobileUserAgent == null || browserMobileUserAgent.length() == 0
+                    ? WebSettings.getDefaultUserAgent(this)
+                    : browserMobileUserAgent);
+            settings.setUseWideViewPort(true);
+            settings.setLoadWithOverviewMode(true);
+        }
+    }
+
+    private void applyBrowserNightMode() {
+        if (browserWebView == null) {
+            return;
+        }
+        if (browserNightMode) {
+            browserWebView.setBackgroundColor(Color.BLACK);
+            try {
+                browserWebView.evaluateJavascript(
+                        "javascript:(function(){document.documentElement.style.filter='invert(1) hue-rotate(180deg)';document.documentElement.style.background='#000';})()",
+                        null);
+            } catch (Exception ignored) {
+                browserWebView.loadUrl("javascript:(function(){document.documentElement.style.filter='invert(1) hue-rotate(180deg)';document.documentElement.style.background='#000';})()");
+            }
+        } else {
+            browserWebView.setBackgroundColor(Color.WHITE);
+            try {
+                browserWebView.evaluateJavascript(
+                        "javascript:(function(){document.documentElement.style.filter='';document.documentElement.style.background='';})()",
+                        null);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void applyBrowserShellNightMode() {
+        int bg = browserNightMode ? Color.rgb(8, 11, 18) : Color.rgb(247, 249, 252);
+        int text = browserNightMode ? Color.rgb(230, 236, 246) : Color.rgb(45, 55, 72);
+        int editText = browserNightMode ? Color.rgb(242, 246, 255) : Color.rgb(32, 41, 57);
+        int muted = browserNightMode ? Color.rgb(147, 160, 184) : Color.rgb(126, 139, 158);
+        if (browserOverlay != null) {
+            browserOverlay.setBackgroundColor(bg);
+        }
+        if (browserTopBar != null) {
+            browserTopBar.setBackgroundColor(Color.TRANSPARENT);
+            for (int i = 0; i < browserTopBar.getChildCount(); i++) {
+                View child = browserTopBar.getChildAt(i);
+                if (child instanceof Button) {
+                    Button b = (Button) child;
+                    boolean accent = "前往".contentEquals(b.getText());
+                    b.setTextColor(accent ? Color.WHITE : text);
+                    if (!accent) {
+                        b.setBackground(browserButtonBg(
+                                browserNightMode ? Color.rgb(25, 31, 43) : Color.WHITE,
+                                browserNightMode ? Color.rgb(55, 66, 88) : Color.rgb(229, 235, 243),
+                                browserNightMode ? Color.rgb(35, 43, 58) : Color.rgb(247, 249, 252)));
+                    }
+                }
+            }
+        }
+        if (browserBottomBar != null) {
+            for (int i = 0; i < browserBottomBar.getChildCount(); i++) {
+                View child = browserBottomBar.getChildAt(i);
+                if (child instanceof Button) {
+                    Button b = (Button) child;
+                    b.setTextColor(text);
+                    b.setBackground(browserButtonBg(
+                            browserNightMode ? Color.rgb(25, 31, 43) : Color.WHITE,
+                            browserNightMode ? Color.rgb(55, 66, 88) : Color.rgb(226, 232, 240),
+                            browserNightMode ? Color.rgb(35, 43, 58) : Color.rgb(242, 246, 250)));
+                }
+            }
+        }
+        if (browserAddressEdit != null) {
+            browserAddressEdit.setTextColor(editText);
+            browserAddressEdit.setHintTextColor(muted);
+            browserAddressEdit.setBackground(browserButtonBg(
+                    browserNightMode ? Color.rgb(17, 23, 34) : Color.WHITE,
+                    browserNightMode ? Color.rgb(55, 66, 88) : Color.rgb(226, 232, 240),
+                    browserNightMode ? Color.rgb(27, 35, 50) : Color.rgb(247, 250, 252)));
+        }
+    }
+
+    private void showBrowserMenu() {
+        final String[] items = new String[] {
+                browserDesktopMode ? "切换移动模式" : "切换电脑模式",
+                "收藏当前页",
+                "打开收藏夹",
+                browserNightMode ? "切换白天模式" : "切换夜间模式",
+                "页面缩放",
+                "刷新页面",
+                "清除浏览器缓存"
         };
-        PackageManager pm = getPackageManager();
-        for (int i = 0; i < packages.length; i++) {
-            Intent launch = pm.getLaunchIntentForPackage(packages[i]);
-            if (launch != null) {
-                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(launch);
+        new AlertDialog.Builder(this)
+                .setTitle("浏览器功能")
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        handleBrowserMenu(which);
+                    }
+                })
+                .show();
+    }
+
+    private void handleBrowserMenu(int which) {
+        if (which == 0) {
+            browserDesktopMode = !browserDesktopMode;
+            prefs.edit().putBoolean("browser_desktop", browserDesktopMode).apply();
+            applyBrowserDesktopMode();
+            if (browserWebView != null) {
+                browserWebView.reload();
+            }
+        } else if (which == 1) {
+            addBrowserBookmark();
+        } else if (which == 2) {
+            showBrowserBookmarks();
+        } else if (which == 3) {
+            browserNightMode = !browserNightMode;
+            prefs.edit().putBoolean("browser_night", browserNightMode).apply();
+            applyBrowserNightMode();
+            applyBrowserShellNightMode();
+        } else if (which == 4) {
+            showBrowserZoomPanel();
+        } else if (which == 5) {
+            if (browserWebView != null) browserWebView.reload();
+        } else if (which == 6) {
+            clearBrowserCache();
+        }
+    }
+
+    private void showBrowserZoomPanel() {
+        final TextView percent = text(browserZoomPercent + "%", 20, Typeface.BOLD,
+                browserNightMode ? Color.rgb(238, 244, 255) : Color.rgb(31, 42, 58));
+        percent.setGravity(Gravity.CENTER);
+        LinearLayout row = row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(12), dp(12), dp(8));
+        Button minus = browserButton("−");
+        Button plus = browserButton("+");
+        row.addView(minus, new LinearLayout.LayoutParams(dp(70), dp(48)));
+        row.addView(percent, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        row.addView(plus, new LinearLayout.LayoutParams(dp(70), dp(48)));
+        final AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("页面缩放")
+                .setView(row)
+                .setNegativeButton("关闭", null)
+                .create();
+        minus.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                setBrowserZoom(browserZoomPercent - 10);
+                percent.setText(browserZoomPercent + "%");
+            }
+        });
+        plus.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                setBrowserZoom(browserZoomPercent + 10);
+                percent.setText(browserZoomPercent + "%");
+            }
+        });
+        dialog.show();
+        restoreImmersiveSoon();
+    }
+
+    private void setBrowserZoom(int value) {
+        browserZoomPercent = Math.max(50, Math.min(200, value));
+        if (prefs != null) {
+            prefs.edit().putInt("browser_zoom_percent", browserZoomPercent).apply();
+        }
+        if (browserWebView != null) {
+            browserWebView.getSettings().setTextZoom(browserZoomPercent);
+            try {
+                browserWebView.evaluateJavascript(
+                        "document.body.style.zoom='" + (browserZoomPercent / 100f) + "'",
+                        null);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void addBrowserBookmark() {
+        String url = currentBrowserUrl();
+        if (url.length() == 0 || url.startsWith("about:")) {
+            Toast.makeText(this, "当前页面不能收藏", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String title = url;
+        try {
+            if (browserWebView != null && browserWebView.getTitle() != null
+                    && browserWebView.getTitle().trim().length() > 0) {
+                title = browserWebView.getTitle().trim();
+            }
+        } catch (Exception ignored) {
+        }
+        int count = prefs.getInt("browser_bookmark_count", 0);
+        for (int i = 0; i < count; i++) {
+            if (url.equals(prefs.getString("browser_bookmark_url_" + i, ""))) {
+                Toast.makeText(this, "已经收藏过", Toast.LENGTH_SHORT).show();
                 return;
             }
         }
+        prefs.edit()
+                .putInt("browser_bookmark_count", count + 1)
+                .putString("browser_bookmark_title_" + count, title)
+                .putString("browser_bookmark_url_" + count, url)
+                .apply();
+        Toast.makeText(this, "已收藏", Toast.LENGTH_SHORT).show();
+    }
+
+    private void showBrowserBookmarks() {
+        final int count = prefs.getInt("browser_bookmark_count", 0);
+        if (count <= 0) {
+            Toast.makeText(this, "还没有收藏", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final ArrayList<String> titles = new ArrayList<String>();
+        final ArrayList<String> urls = new ArrayList<String>();
+        for (int i = 0; i < count; i++) {
+            String url = prefs.getString("browser_bookmark_url_" + i, "");
+            if (url.length() == 0) {
+                continue;
+            }
+            String title = prefs.getString("browser_bookmark_title_" + i, url);
+            titles.add(title);
+            urls.add(url);
+        }
+        showBookmarkSheet(titles, urls);
+    }
+
+    private void showBookmarkSheet(final ArrayList<String> titles, final ArrayList<String> urls) {
+        pendingBookmarkDeletes.clear();
+        final FrameLayout shade = new FrameLayout(this);
+        shade.setBackgroundColor(Color.argb(132, 12, 18, 28));
+        shade.setClickable(true);
+        if (Build.VERSION.SDK_INT >= 21) {
+            shade.setElevation(dp(62));
+        }
+        LinearLayout panel = column();
+        panel.setPadding(dp(16), dp(14), dp(16), dp(12));
+        panel.setBackground(browserDialogBg());
+        LinearLayout head = row();
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = text("收藏夹", 20, Typeface.BOLD, Color.rgb(28, 38, 52));
+        head.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        Button done = browserButton("完成");
+        head.addView(done, new LinearLayout.LayoutParams(dp(76), dp(40)));
+        panel.addView(head, matchWrap());
+        addPanelGap(panel, 8);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = column();
+        for (int i = 0; i < urls.size(); i++) {
+            list.addView(bookmarkRow(titles.get(i), urls.get(i), shade), new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(62)));
+            if (i < urls.size() - 1) {
+                list.addView(browserDivider(), new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
+            }
+        }
+        scroll.addView(list, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        panel.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
+                Math.min(getResources().getDisplayMetrics().widthPixels - dp(48), dp(560)),
+                Math.min(getResources().getDisplayMetrics().heightPixels - dp(96), dp(520)));
+        panelParams.gravity = Gravity.CENTER;
+        shade.addView(panel, panelParams);
+        done.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { closeBookmarkSheet(shade); }
+        });
+        shade.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { closeBookmarkSheet(shade); }
+        });
+        panel.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { }
+        });
+        if (rootView != null) {
+            rootView.addView(shade, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            shade.bringToFront();
+        }
+        restoreImmersiveSoon();
+    }
+
+    private View bookmarkRow(final String title, final String url, final FrameLayout shade) {
+        final FrameLayout wrap = new FrameLayout(this);
+        LinearLayout row = row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), 0, dp(12), 0);
+        row.setBackground(browserTabRowBg(false));
+        LinearLayout texts = column();
+        texts.setGravity(Gravity.CENTER_VERTICAL);
+        TextView t = text(browserShortText(title, 28), 15, Typeface.BOLD, Color.rgb(30, 40, 55));
+        t.setSingleLine(true);
+        TextView u = text(browserShortText(browserCompactUrl(url), 42), 12, Typeface.NORMAL, Color.rgb(117, 130, 150));
+        u.setSingleLine(true);
+        texts.addView(t, matchWrap());
+        texts.addView(u, matchWrap());
+        row.addView(texts, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f));
+        final TextView star = text("★", 28, Typeface.BOLD, Color.rgb(246, 206, 116));
+        star.setGravity(Gravity.CENTER);
+        row.addView(star, new LinearLayout.LayoutParams(dp(48), LinearLayout.LayoutParams.MATCH_PARENT));
+        wrap.addView(row, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                closeBookmarkSheet(shade);
+                if (browserWebView != null) {
+                    browserWebView.loadUrl(url);
+                }
+                browserCurrentUrl = url;
+                updateCurrentBrowserTab(url, title);
+            }
+        });
+        star.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (pendingBookmarkDeletes.contains(url)) {
+                    pendingBookmarkDeletes.remove(url);
+                    star.setTextColor(Color.rgb(246, 206, 116));
+                } else {
+                    pendingBookmarkDeletes.add(url);
+                    star.setTextColor(Color.rgb(170, 178, 190));
+                }
+            }
+        });
+        return wrap;
+    }
+
+    private void closeBookmarkSheet(FrameLayout shade) {
+        if (pendingBookmarkDeletes.size() > 0) {
+            for (int i = 0; i < pendingBookmarkDeletes.size(); i++) {
+                removeBrowserBookmark(pendingBookmarkDeletes.get(i), false);
+            }
+            Toast.makeText(this, "已更新收藏夹", Toast.LENGTH_SHORT).show();
+        }
+        pendingBookmarkDeletes.clear();
+        dismissBrowserTabs(shade);
+    }
+
+    private void removeBrowserBookmark(String targetUrl) {
+        removeBrowserBookmark(targetUrl, true);
+    }
+
+    private void removeBrowserBookmark(String targetUrl, boolean showToast) {
+        int count = prefs.getInt("browser_bookmark_count", 0);
+        ArrayList<String> titles = new ArrayList<String>();
+        ArrayList<String> urls = new ArrayList<String>();
+        for (int i = 0; i < count; i++) {
+            String url = prefs.getString("browser_bookmark_url_" + i, "");
+            if (url.length() == 0 || url.equals(targetUrl)) {
+                continue;
+            }
+            titles.add(prefs.getString("browser_bookmark_title_" + i, url));
+            urls.add(url);
+        }
+        SharedPreferences.Editor editor = prefs.edit();
+        for (int i = 0; i < count; i++) {
+            editor.remove("browser_bookmark_title_" + i);
+            editor.remove("browser_bookmark_url_" + i);
+        }
+        editor.putInt("browser_bookmark_count", urls.size());
+        for (int i = 0; i < urls.size(); i++) {
+            editor.putString("browser_bookmark_title_" + i, titles.get(i));
+            editor.putString("browser_bookmark_url_" + i, urls.get(i));
+        }
+        editor.apply();
+        if (showToast) {
+            Toast.makeText(this, "已取消收藏", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void clearBrowserCache() {
+        try {
+            if (browserWebView != null) {
+                browserWebView.clearCache(true);
+                browserWebView.clearHistory();
+                browserWebView.clearFormData();
+                browserWebView.evaluateJavascript(
+                        "try{localStorage.clear();sessionStorage.clear();}catch(e){}",
+                        null);
+            }
+            CookieManager cookieManager = CookieManager.getInstance();
+            if (Build.VERSION.SDK_INT >= 21) {
+                cookieManager.removeAllCookies(null);
+                cookieManager.flush();
+            } else {
+                cookieManager.removeAllCookie();
+            }
+            WebStorage.getInstance().deleteAllData();
+            WebView web = new WebView(this);
+            web.clearCache(true);
+            web.destroy();
+        } catch (Exception ignored) {
+        }
+        Toast.makeText(this, "缓存、Cookie 和本地数据已清除", Toast.LENGTH_SHORT).show();
+        if (browserWebView != null) {
+            browserWebView.reload();
+        }
+    }
+
+    private boolean handleBrowserUrl(WebView view, String url) {
+        if (url == null || url.length() == 0) {
+            return true;
+        }
+        String lower = url.toLowerCase(Locale.US);
+        if (lower.startsWith("http://") || lower.startsWith("https://")
+                || lower.startsWith("file://") || lower.startsWith("about:")) {
+            return false;
+        }
+        String extracted = extractWebUrlFromSpecialScheme(url);
+        if (extracted.length() > 0) {
+            view.loadUrl(extracted);
+            return true;
+        }
+        if (lower.startsWith("baiduboxapp://") || lower.startsWith("baidubrowser://")
+                || lower.startsWith("qb://") || lower.startsWith("snssdk")
+                || lower.startsWith("weixin://") || lower.startsWith("alipays://")) {
+            Toast.makeText(this, "已拦截 App 跳转", Toast.LENGTH_SHORT).show();
+            return true;
+        }
+        try {
+            Intent intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME);
+            if (intent != null) {
+                String fallback = intent.getStringExtra("browser_fallback_url");
+                if (fallback != null && fallback.length() > 0) {
+                    view.loadUrl(fallback);
+                    return true;
+                }
+                startActivity(intent);
+                return true;
+            }
+        } catch (Exception ignored) {
+        }
+        Toast.makeText(this, "当前网页想打开外部应用", Toast.LENGTH_SHORT).show();
+        return true;
+    }
+
+    private boolean isBadBrowserScheme(String url) {
+        if (url == null) {
+            return false;
+        }
+        String lower = url.toLowerCase(Locale.US);
+        return lower.startsWith("baiduboxapp://")
+                || lower.startsWith("baidubrowser://")
+                || lower.startsWith("intent://");
+    }
+
+    private String extractWebUrlFromSpecialScheme(String url) {
+        try {
+            Uri uri = Uri.parse(url);
+            String nested = uri.getQueryParameter("url");
+            if (nested == null || nested.length() == 0) {
+                nested = uri.getQueryParameter("u");
+            }
+            if (nested != null && nested.length() > 0) {
+                String decoded = Uri.decode(nested);
+                if (decoded.startsWith("http://") || decoded.startsWith("https://")) {
+                    return decoded;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        int http = url.indexOf("http%3A");
+        int https = url.indexOf("https%3A");
+        int start = https >= 0 ? https : http;
+        if (start >= 0) {
+            String tail = Uri.decode(url.substring(start));
+            int cut = tail.indexOf('&');
+            if (cut > 0) {
+                tail = tail.substring(0, cut);
+            }
+            if (tail.startsWith("http://") || tail.startsWith("https://")) {
+                return tail;
+            }
+        }
+        return "";
+    }
+
+    private void showBrowserCustomView(View view, WebChromeClient.CustomViewCallback callback) {
+        if (browserCustomView != null) {
+            if (callback != null) {
+                callback.onCustomViewHidden();
+            }
+            return;
+        }
+        browserCustomView = view;
+        browserCustomViewCallback = callback;
+        setBrowserChromeVisible(false);
+        if (browserCustomView != null) {
+            browserCustomView.setBackgroundColor(Color.BLACK);
+            browserCustomView.setClickable(true);
+            browserCustomView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        }
+        if (rootView != null) {
+            FrameLayout.LayoutParams full = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT);
+            rootView.addView(browserCustomView, full);
+            // 浏览器界面有 elevation=36，全屏层必须更高，否则会被压在下面只露黑框白边
+            if (Build.VERSION.SDK_INT >= 21 && browserCustomView != null) {
+                browserCustomView.setElevation(dp(64));
+            }
+            browserCustomView.bringToFront();
+        }
+        enterImmersive();
+    }
+
+    private void hideBrowserCustomView() {
+        if (browserCustomView == null) {
+            return;
+        }
+        try {
+            if (rootView != null) {
+                rootView.removeView(browserCustomView);
+            }
+            if (browserCustomViewCallback != null) {
+                browserCustomViewCallback.onCustomViewHidden();
+            }
+        } catch (Exception ignored) {
+        }
+        browserCustomView = null;
+        browserCustomViewCallback = null;
+        setBrowserChromeVisible(true);
+        enterImmersive();
+    }
+
+    private void setBrowserChromeVisible(boolean visible) {
+        int state = visible ? View.VISIBLE : View.GONE;
+        browserVideoExpanded = !visible;
+        if (browserTopBar != null) {
+            browserTopBar.setVisibility(state);
+        }
+        if (browserBottomBar != null) {
+            browserBottomBar.setVisibility(state);
+        }
+        restoreImmersiveSoon();
+    }
+
+    private void exitInjectedVideoFullscreen() {
+        browserVideoExpanded = false;
+        setBrowserChromeVisible(true);
+        if (browserWebView == null) {
+            return;
+        }
+        String js = "(function(){"
+                + "var p=document.querySelector('[data-revive-full=\"1\"]');"
+                + "if(p){p.removeAttribute('data-revive-full');p.style.cssText='';}"
+                + "var vs=document.querySelectorAll('video');for(var i=0;i<vs.length;i++){vs[i].style.width='';vs[i].style.height='';vs[i].style.objectFit='';}"
+                + "try{if(document.exitFullscreen)document.exitFullscreen();else if(document.webkitExitFullscreen)document.webkitExitFullscreen();}catch(e){}"
+                + "})();";
+        try {
+            browserWebView.evaluateJavascript(js, null);
+        } catch (Exception ignored) {
+            browserWebView.loadUrl("javascript:" + js);
+        }
+    }
+
+    private void injectBrowserVideoFullscreen() {
+        if (browserWebView == null) {
+            return;
+        }
+        // 只负责：网页进入/退出原生全屏时，隐藏或恢复我们的地址栏和底部栏。
+        // 不再用 JS 强行给 video 套 CSS 黑框——那样会和系统原生全屏(onShowCustomView)打架，
+        // 导致 B 站等播放器布局错乱、画面冻结发黑、切换画质失败。
+        String js = "(function(){"
+                + "if(window.__reviveVideoFix)return;window.__reviveVideoFix=1;"
+                + "function call(n){try{if(window.ReviveBrowser&&ReviveBrowser[n])ReviveBrowser[n]();}catch(e){}}"
+                + "function sync(){var f=document.fullscreenElement||document.webkitFullscreenElement||document.webkitCurrentFullScreenElement;if(f){call('enterVideoFullscreen');}else{call('exitVideoFullscreen');}}"
+                + "document.addEventListener('fullscreenchange',sync,true);"
+                + "document.addEventListener('webkitfullscreenchange',sync,true);"
+                + "})();";
+        try {
+            browserWebView.evaluateJavascript(js, null);
+        } catch (Exception ignored) {
+            browserWebView.loadUrl("javascript:" + js);
+        }
+    }
+
+    public class BrowserVideoBridge {
+        @JavascriptInterface
+        public void enterVideoFullscreen() {
+            handler.post(new Runnable() {
+                @Override public void run() { setBrowserChromeVisible(false); }
+            });
+        }
+
+        @JavascriptInterface
+        public void exitVideoFullscreen() {
+            handler.post(new Runnable() {
+                @Override public void run() { setBrowserChromeVisible(true); }
+            });
+        }
+    }
+
+    private void closeBrowser() {
+        hideKeyboard();
+        hideBrowserCustomView();
+        if (rootView != null && browserOverlay != null) {
+            rootView.removeView(browserOverlay);
+        }
+        if (browserWebView != null) {
+            try {
+                browserWebView.stopLoading();
+                browserWebView.loadUrl("about:blank");
+                browserWebView.destroy();
+            } catch (Exception ignored) {
+            }
+        }
+        browserOverlay = null;
+        browserWebView = null;
+        browserAddressEdit = null;
+        browserDesktopButton = null;
+        browserTabsButton = null;
+        recycleBrowserSnapshots();
+        browserTabSnapshots.clear();
+        browserOpen = false;
+        if (dockView != null && zoomOverlay == null) {
+            dockView.setVisibility(View.VISIBLE);
+        }
+        enterImmersive();
+    }
+
+    private String currentBrowserUrl() {
+        try {
+            if (browserWebView != null && browserWebView.getUrl() != null
+                    && browserWebView.getUrl().length() > 0) {
+                return browserWebView.getUrl();
+            }
+        } catch (Exception ignored) {
+        }
+        return browserCurrentUrl == null ? "" : browserCurrentUrl;
+    }
+
+    private void detachBrowserForRebuild() {
+        hideBrowserCustomView();
+        try {
+            if (browserWebView != null) {
+                browserCurrentUrl = currentBrowserUrl();
+                browserWebView.stopLoading();
+                browserWebView.loadUrl("about:blank");
+                browserWebView.destroy();
+            }
+        } catch (Exception ignored) {
+        }
+        browserOverlay = null;
+        browserWebView = null;
+        browserAddressEdit = null;
+        browserDesktopButton = null;
+        browserTabsButton = null;
+        browserCustomView = null;
+        browserCustomViewCallback = null;
+    }
+
+    private void handleBrowserCrashed() {
+        try {
+            if (rootView != null && browserOverlay != null) {
+                rootView.removeView(browserOverlay);
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            if (browserWebView != null) {
+                browserWebView.destroy();
+            }
+        } catch (Exception ignored) {
+        }
+        browserOverlay = null;
+        browserWebView = null;
+        browserAddressEdit = null;
+        browserDesktopButton = null;
+        browserTabsButton = null;
+        browserCustomView = null;
+        browserCustomViewCallback = null;
+        browserOpen = true;
+        Toast.makeText(this, "浏览器正在重建", Toast.LENGTH_SHORT).show();
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                showBrowser(browserCurrentUrl.length() > 0 ? browserCurrentUrl : "https://www.baidu.com");
+            }
+        }, 220);
+    }
+
+    private void openMusicApp() {
+        showMusicAppChooser(bestActiveMusicPackage());
+    }
+
+    private String bestActiveMusicPackage() {
+        if (currentMusicPackage != null && currentMusicPackage.length() > 0
+                && !isSystemNotificationPackage(currentMusicPackage)) {
+            return currentMusicPackage;
+        }
+        if (latestNotifyPackage != null && latestNotifyPackage.length() > 0
+                && !isSystemNotificationPackage(latestNotifyPackage)) {
+            return latestNotifyPackage;
+        }
+        return "";
+    }
+
+    private boolean launchPackage(String packageName) {
+        if (packageName == null || packageName.length() == 0) {
+            return false;
+        }
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
+            if (launch == null) {
+                return false;
+            }
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(launch);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void showMusicAppChooser(String preferredPackage) {
+        final PackageManager pm = getPackageManager();
+        final List<String> labels = new ArrayList<String>();
+        final List<String> packages = new ArrayList<String>();
+        addMusicPackageIfInstalled(pm, labels, packages, preferredPackage);
+        addMusicPackageIfInstalled(pm, labels, packages, "com.tencent.qqmusic");
+        addMusicPackageIfInstalled(pm, labels, packages, "com.kugou.android");
+        addMusicPackageIfInstalled(pm, labels, packages, "com.netease.cloudmusic");
+        addMusicPackageIfInstalled(pm, labels, packages, "cn.kuwo.player");
+        addMusicPackageIfInstalled(pm, labels, packages, "com.miui.player");
+        addMusicPackageIfInstalled(pm, labels, packages, "com.android.music");
+
         Intent intent = new Intent(Intent.ACTION_MAIN);
         intent.addCategory(Intent.CATEGORY_APP_MUSIC);
         try {
-            startActivity(intent);
-        } catch (Exception ex) {
-            Toast.makeText(this, "没找到音乐播放器", Toast.LENGTH_SHORT).show();
+            List<ResolveInfo> infos = pm.queryIntentActivities(intent, 0);
+            for (int i = 0; infos != null && i < infos.size(); i++) {
+                ResolveInfo info = infos.get(i);
+                if (info == null || info.activityInfo == null || info.activityInfo.packageName == null) {
+                    continue;
+                }
+                addMusicPackageIfInstalled(pm, labels, packages, info.activityInfo.packageName);
+            }
+        } catch (Exception ignored) {
         }
+
+        if (packages.size() == 0) {
+            try {
+                startActivity(intent);
+            } catch (Exception ex) {
+                Toast.makeText(this, "没找到音乐播放器", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        if (packages.size() == 1) {
+            launchPackage(packages.get(0));
+            return;
+        }
+        try {
+            String activeLabel = "";
+            if (preferredPackage != null && preferredPackage.length() > 0 && packages.contains(preferredPackage)) {
+                activeLabel = labels.get(packages.indexOf(preferredPackage));
+            }
+            new AlertDialog.Builder(this)
+                    .setTitle(activeLabel.length() > 0 ? "打开 " + activeLabel : "打开音乐播放器")
+                    .setItems(labels.toArray(new String[labels.size()]), new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface dialog, int which) {
+                            if (which >= 0 && which < packages.size()) {
+                                launchPackage(packages.get(which));
+                            }
+                        }
+                    })
+                    .show();
+        } catch (Exception ex) {
+            launchPackage(packages.get(0));
+        }
+    }
+
+    private void addMusicPackageIfInstalled(PackageManager pm, List<String> labels, List<String> packages, String packageName) {
+        if (packageName == null || packageName.length() == 0 || packages.contains(packageName)) {
+            return;
+        }
+        Intent launch = pm.getLaunchIntentForPackage(packageName);
+        if (launch == null) {
+            return;
+        }
+        String label = packageName;
+        try {
+            label = pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString();
+        } catch (Exception ignored) {
+        }
+        labels.add(label);
+        packages.add(packageName);
     }
 
     private void sendMediaKey(int keyCode) {
@@ -1928,6 +3649,9 @@ public class MainActivity extends Activity {
     }
 
     private void refreshWeather(final boolean showLoading) {
+        if (browserOpen) {
+            return;
+        }
         if (showLoading) {
             weatherTitle = "天气加载中";
             weatherDetail = "正在获取实时天气";
@@ -2037,39 +3761,13 @@ public class MainActivity extends Activity {
             return results;
         }
         try {
-            String url = "http://geocoding-api.open-meteo.com/v1/search?count=" + Math.max(1, limit)
-                    + "&language=zh&format=json&name="
-                    + URLEncoder.encode(query.length() == 0 ? "福州" : query, "UTF-8");
-            String json = fetchText(url, 4500, 6500);
-            if (json == null) {
-                json = fetchText(url.replace("http://", "https://"), 4500, 6500);
+            addGeocodedWeatherPlaces(results, query.length() == 0 ? "福州" : query, "zh", limit);
+            String mapped = englishWeatherQuery(query);
+            if (results.size() < limit && mapped.length() > 0 && !mapped.equalsIgnoreCase(query)) {
+                addGeocodedWeatherPlaces(results, mapped, "en", limit);
             }
-            if (json != null) {
-                JSONObject root = new JSONObject(json);
-                if (root.has("results")) {
-                    JSONArray items = root.getJSONArray("results");
-                    for (int i = 0; i < items.length() && results.size() < limit; i++) {
-                        JSONObject item = items.getJSONObject(i);
-                        String name = item.optString("name", "");
-                        if (name.length() == 0) {
-                            continue;
-                        }
-                        String admin1 = item.optString("admin1", "");
-                        String country = item.optString("country", "");
-                        String label = name;
-                        if (admin1.length() > 0 && label.indexOf(admin1) < 0) {
-                            label += " · " + admin1;
-                        }
-                        if (country.length() > 0 && label.indexOf(country) < 0) {
-                            label += " · " + country;
-                        }
-                        addUniqueCity(results, new CityCandidate(
-                                name,
-                                label,
-                                item.getDouble("latitude"),
-                                item.getDouble("longitude")));
-                    }
-                }
+            if (results.size() < limit) {
+                addGeocodedWeatherPlaces(results, query.length() == 0 ? "Fuzhou" : query, "en", limit);
             }
         } catch (Exception ignored) {
         }
@@ -2080,6 +3778,76 @@ public class MainActivity extends Activity {
             results.remove(results.size() - 1);
         }
         return results;
+    }
+
+    private void addGeocodedWeatherPlaces(List<CityCandidate> results, String query, String language, int limit) {
+        if (results.size() >= limit || query == null || query.trim().length() == 0) {
+            return;
+        }
+        try {
+            String url = "http://geocoding-api.open-meteo.com/v1/search?count=" + Math.max(1, limit)
+                    + "&language=" + language + "&format=json&name="
+                    + URLEncoder.encode(query.trim(), "UTF-8");
+            String json = fetchText(url, 4500, 6500);
+            if (json == null) {
+                json = fetchText(url.replace("http://", "https://"), 4500, 6500);
+            }
+            if (json == null) {
+                return;
+            }
+            JSONObject root = new JSONObject(json);
+            if (!root.has("results")) {
+                return;
+            }
+            JSONArray items = root.getJSONArray("results");
+            for (int i = 0; i < items.length() && results.size() < limit; i++) {
+                JSONObject item = items.getJSONObject(i);
+                String name = item.optString("name", "");
+                if (name.length() == 0) {
+                    continue;
+                }
+                String admin1 = item.optString("admin1", "");
+                String country = item.optString("country", "");
+                String label = name;
+                if (admin1.length() > 0 && label.indexOf(admin1) < 0) {
+                    label += " · " + admin1;
+                }
+                if (country.length() > 0 && label.indexOf(country) < 0) {
+                    label += " · " + country;
+                }
+                addUniqueCity(results, new CityCandidate(
+                        name,
+                        label,
+                        item.getDouble("latitude"),
+                        item.getDouble("longitude")));
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String englishWeatherQuery(String query) {
+        if (query == null) {
+            return "";
+        }
+        String q = query.trim().toLowerCase(Locale.US);
+        if (q.length() == 0) {
+            return "";
+        }
+        for (int i = 0; i < LOCAL_CITIES.length; i++) {
+            CityCandidate city = LOCAL_CITIES[i];
+            String haystack = (city.name + " " + city.label + " " + city.alias).toLowerCase(Locale.US);
+            if (haystack.indexOf(q) >= 0 || city.name.startsWith(query.trim())) {
+                String alias = city.alias == null ? "" : city.alias.trim();
+                int space = alias.indexOf(' ');
+                return space > 0 ? alias.substring(0, space).trim() : alias;
+            }
+        }
+        if ("纽约".equals(query.trim())) return "New York";
+        if ("伦敦".equals(query.trim())) return "London";
+        if ("巴黎".equals(query.trim())) return "Paris";
+        if ("东京".equals(query.trim())) return "Tokyo";
+        if ("洛杉矶".equals(query.trim())) return "Los Angeles";
+        return query.trim();
     }
 
     private CityCandidate exactLocalWeatherPlace(String place) {
@@ -2124,21 +3892,12 @@ public class MainActivity extends Activity {
             return new double[] { candidate.lat, candidate.lon };
         }
         try {
-            String url = "http://geocoding-api.open-meteo.com/v1/search?count=1&language=zh&format=json&name="
-                    + URLEncoder.encode(place, "UTF-8");
-            String json = fetchText(url, 4500, 6500);
-            if (json == null) {
-                json = fetchText(url.replace("http://", "https://"), 4500, 6500);
-            }
-            if (json == null) {
+            List<CityCandidate> results = searchWeatherPlaces(place, 1);
+            if (results.size() == 0) {
                 return null;
             }
-            JSONObject root = new JSONObject(json);
-            if (!root.has("results")) {
-                return null;
-            }
-            JSONObject first = root.getJSONArray("results").getJSONObject(0);
-            return new double[] { first.getDouble("latitude"), first.getDouble("longitude") };
+            CityCandidate first = results.get(0);
+            return new double[] { first.lat, first.lon };
         } catch (Exception ex) {
             return null;
         }
@@ -2332,6 +4091,7 @@ public class MainActivity extends Activity {
         if (rootView == null) {
             return;
         }
+        activeZoomMode = mode == null ? "" : mode;
         if (zoomOverlay != null) {
             rootView.removeView(zoomOverlay);
         }
@@ -2357,22 +4117,25 @@ public class MainActivity extends Activity {
         zoomOverlay.addView(zoomBackgroundView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
+        boolean compact = compactLandscape();
         LinearLayout content = column();
         content.setClickable(true);
         content.setFocusableInTouchMode(true);
-        content.setPadding(dp(26), dp(22), dp(26), dp(24));
+        content.setPadding(compact ? dp(16) : dp(26), compact ? dp(10) : dp(22),
+                compact ? dp(16) : dp(26), compact ? dp(12) : dp(24));
         zoomOverlay.addView(content, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
         LinearLayout top = row();
         top.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text(zoomTitle(mode), 24, Typeface.BOLD, TEXT);
+        TextView title = text(zoomTitle(mode), compact ? 21 : 24, Typeface.BOLD, TEXT);
         top.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         Button close = ghostButton("返回");
-        top.addView(close, new LinearLayout.LayoutParams(dp(92), dp(44)));
+        top.addView(close, new LinearLayout.LayoutParams(compact ? dp(74) : dp(92),
+                compact ? dp(36) : dp(44)));
         content.addView(top, matchWrap());
-        addPanelGap(content, 12);
+        addPanelGap(content, compact ? 7 : 12);
         close.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -2420,6 +4183,7 @@ public class MainActivity extends Activity {
             dockView.setVisibility(View.VISIBLE);
         }
         zoomOverlay = null;
+        activeZoomMode = "";
         zoomDigitViews = null;
         zoomDateView = null;
         zoomMillisView = null;
@@ -2446,16 +4210,44 @@ public class MainActivity extends Activity {
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(6);
         grid.setRowCount(1);
+
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int screenW = Math.max(1, metrics.widthPixels);
+        int screenH = Math.max(1, metrics.heightPixels);
+        float scaledDensity = Math.max(1f, metrics.scaledDensity);
+        boolean landscape = screenW >= screenH;
+        int horizontalPadding = dp(52);
+        int usableW = Math.max(dp(240), screenW - horizontalPadding);
+        int usableH = Math.max(dp(220), screenH - dp(170));
+        int tileMargin = Math.max(dp(2), Math.min(dp(6), usableW / 180));
+        int tileW = Math.max(dp(42), Math.min(dp(136), (usableW - tileMargin * 12) / 6));
+        int targetH = Math.round(tileW * 1.30f);
+        int maxH = Math.max(dp(62), usableH - dp(84));
+        int tileH = Math.max(dp(58), Math.min(dp(176), Math.min(targetH, maxH)));
+        float tileWSp = tileW / scaledDensity;
+        float tileHSp = tileH / scaledDensity;
+        float screenWSp = screenW / scaledDensity;
+        float screenHSp = screenH / scaledDensity;
+        float digitSp = Math.max(26f, Math.min(94f, Math.min(tileWSp * 0.62f, tileHSp * 0.56f)));
+        float dateSp = landscape
+                ? Math.max(18f, Math.min(30f, screenHSp / 24f))
+                : Math.max(16f, Math.min(22f, screenWSp / 18f));
+        float millisSp = landscape
+                ? Math.max(13f, Math.min(20f, screenHSp / 36f))
+                : Math.max(12f, Math.min(16f, screenWSp / 27f));
+
         zoomDigitViews = new TextView[6];
         for (int i = 0; i < zoomDigitViews.length; i++) {
-            TextView digit = flipDigit("0", 94);
+            TextView digit = flipDigit("0", digitSp);
             digit.setGravity(Gravity.CENTER);
             digit.setIncludeFontPadding(false);
+            digit.setMinWidth(0);
+            digit.setMinimumWidth(0);
             zoomDigitViews[i] = digit;
             GridLayout.LayoutParams p = new GridLayout.LayoutParams();
-            p.width = dp(136);
-            p.height = dp(176);
-            p.setMargins(dp(6), 0, dp(6), 0);
+            p.width = tileW;
+            p.height = tileH;
+            p.setMargins(tileMargin, 0, tileMargin, 0);
             grid.addView(digit, p);
         }
         LinearLayout.LayoutParams gp = new LinearLayout.LayoutParams(
@@ -2464,7 +4256,7 @@ public class MainActivity extends Activity {
         gp.gravity = Gravity.CENTER_HORIZONTAL;
         wrap.addView(grid, gp);
 
-        zoomDateView = text("", 30, Typeface.BOLD, TEXT);
+        zoomDateView = text("", dateSp, Typeface.BOLD, TEXT);
         zoomDateView.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams dpv = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2472,7 +4264,7 @@ public class MainActivity extends Activity {
         dpv.setMargins(0, dp(22), 0, dp(4));
         wrap.addView(zoomDateView, dpv);
 
-        zoomMillisView = text("000 ms", 20, Typeface.NORMAL, CYAN);
+        zoomMillisView = text("000 ms", millisSp, Typeface.NORMAL, CYAN);
         zoomMillisView.setGravity(Gravity.CENTER);
         zoomMillisView.setAlpha(0.72f);
         LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(
@@ -2497,75 +4289,104 @@ public class MainActivity extends Activity {
     }
 
     private View zoomConsole() {
-        LinearLayout wrap = row();
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        boolean wide = metrics.widthPixels >= metrics.heightPixels;
+        boolean compact = compactLandscape();
+        LinearLayout wrap = wide ? row() : column();
         wrap.setClickable(true);
-        wrap.setGravity(Gravity.CENTER_VERTICAL);
+        wrap.setGravity(wide ? Gravity.CENTER_VERTICAL : Gravity.CENTER_HORIZONTAL);
 
         LinearLayout left = panel("音乐遥控", "", BLUE);
+        int musicCardHeight = compact ? Math.max(dp(112), Math.min(dp(132), metrics.heightPixels / 3))
+                : (wide ? dp(162) : Math.max(dp(124), Math.min(dp(150), metrics.heightPixels / 7)));
         left.addView(musicCard(true), new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(162)));
-        addPanelGap(left, 18);
+                LinearLayout.LayoutParams.MATCH_PARENT, musicCardHeight));
+        addPanelGap(left, compact ? 8 : (wide ? 18 : 10));
 
-        TextView lyric = text(musicInfoLine(), 24, Typeface.BOLD, TEXT);
+        TextView lyric = text(musicInfoLine(), compact ? 16 : (wide ? 24 : 19), Typeface.BOLD, TEXT);
         lyric.setGravity(Gravity.CENTER);
-        lyric.setPadding(dp(16), dp(18), dp(16), dp(18));
+        lyric.setPadding(dp(compact ? 10 : 14), compact ? dp(8) : (wide ? dp(18) : dp(12)),
+                dp(compact ? 10 : 14), compact ? dp(8) : (wide ? dp(18) : dp(12)));
         lyric.setBackground(metricBg(PINK));
         lyric.setSingleLine(false);
         lyric.setIncludeFontPadding(true);
         musicInfoView = lyric;
         left.addView(lyric, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(128)));
-        wrap.addView(left, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.15f));
+                LinearLayout.LayoutParams.MATCH_PARENT, wide ? (compact ? dp(56) : dp(128)) : 0,
+                wide ? 0f : 1f));
 
         LinearLayout right = panel("待办事项", "", PINK);
         right.addView(todoPanel(), new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        rp.setMargins(dp(12), 0, 0, 0);
-        wrap.addView(right, rp);
+        if (wide) {
+            wrap.addView(left, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT,
+                    compact ? 1.02f : 1.15f));
+            LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT,
+                    compact ? 1.12f : 1f);
+            rp.setMargins(compact ? dp(8) : dp(12), 0, 0, 0);
+            wrap.addView(right, rp);
+        } else {
+            wrap.addView(left, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.86f));
+            LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+            rp.setMargins(0, dp(12), 0, 0);
+            wrap.addView(right, rp);
+        }
         return wrap;
     }
 
     private View zoomFocus() {
-        LinearLayout wrap = row();
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        boolean wide = metrics.widthPixels >= metrics.heightPixels;
+        boolean compact = compactLandscape();
+        LinearLayout wrap = wide ? row() : column();
         wrap.setClickable(true);
-        wrap.setGravity(Gravity.CENTER_VERTICAL);
+        wrap.setGravity(wide ? Gravity.CENTER_VERTICAL : Gravity.CENTER_HORIZONTAL);
 
         LinearLayout left = panel("专注仪表盘", "", PINK);
         zoomTomatoDial = new TomatoDialView(this);
         left.addView(zoomTomatoDial, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        wrap.addView(left, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1.25f));
+        if (wide) {
+            wrap.addView(left, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT,
+                    compact ? 1.05f : 1.25f));
+        } else {
+            wrap.addView(left, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1.18f));
+        }
 
         LinearLayout controls = panel("时间设定", "", CYAN);
+        int buttonH = compact ? dp(38) : (wide ? dp(56) : Math.max(dp(44), Math.min(dp(52), metrics.heightPixels / 15)));
+        int inputH = compact ? dp(34) : (wide ? dp(48) : Math.max(dp(42), Math.min(dp(50), metrics.heightPixels / 16)));
         zoomStartPauseButton = actionButton("开始专注", CYAN);
         controls.addView(zoomStartPauseButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(56)));
-        addPanelGap(controls, 10);
+                LinearLayout.LayoutParams.MATCH_PARENT, buttonH));
+        addPanelGap(controls, compact ? 5 : (wide ? 10 : 7));
         LinearLayout presetRow = row();
         Button p25 = ghostButton("25 分");
         Button p5 = ghostButton("5 分");
         Button p45 = ghostButton("45 分");
-        presetRow.addView(p25, new LinearLayout.LayoutParams(0, dp(48), 1f));
-        presetRow.addView(p5, new LinearLayout.LayoutParams(0, dp(48), 1f));
-        presetRow.addView(p45, new LinearLayout.LayoutParams(0, dp(48), 1f));
+        presetRow.addView(p25, new LinearLayout.LayoutParams(0, inputH, 1f));
+        presetRow.addView(p5, new LinearLayout.LayoutParams(0, inputH, 1f));
+        presetRow.addView(p45, new LinearLayout.LayoutParams(0, inputH, 1f));
         controls.addView(presetRow, matchWrap());
-        addPanelGap(controls, 12);
+        addPanelGap(controls, compact ? 5 : (wide ? 12 : 8));
 
         LinearLayout customRow = row();
         customMinutesEdit = compactEdit("分钟");
         customMinutesEdit.setInputType(InputType.TYPE_CLASS_NUMBER);
         Button set = actionButton("设定", AMBER);
-        customRow.addView(customMinutesEdit, new LinearLayout.LayoutParams(0, dp(48), 1f));
-        LinearLayout.LayoutParams setParams = new LinearLayout.LayoutParams(dp(96), dp(48));
-        setParams.setMargins(dp(8), 0, 0, 0);
+        customRow.addView(customMinutesEdit, new LinearLayout.LayoutParams(0, inputH, 1f));
+        LinearLayout.LayoutParams setParams = new LinearLayout.LayoutParams(compact ? dp(68) : (wide ? dp(96) : dp(82)), inputH);
+        setParams.setMargins(compact ? dp(6) : dp(8), 0, 0, 0);
         customRow.addView(set, setParams);
         controls.addView(customRow, matchWrap());
-        addPanelGap(controls, 14);
+        addPanelGap(controls, compact ? 5 : (wide ? 14 : 8));
 
         Button reset = ghostButton("重置当前计时");
         controls.addView(reset, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(48)));
+                LinearLayout.LayoutParams.MATCH_PARENT, inputH));
 
         zoomStartPauseButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { toggleTimer(); }
@@ -2590,8 +4411,10 @@ public class MainActivity extends Activity {
             }
         });
 
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.82f);
-        cp.setMargins(dp(12), 0, 0, 0);
+        LinearLayout.LayoutParams cp = wide
+                ? new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, compact ? 0.95f : 0.82f)
+                : new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.82f);
+        cp.setMargins(wide ? (compact ? dp(8) : dp(12)) : 0, wide ? 0 : dp(12), 0, 0);
         wrap.addView(controls, cp);
         return wrap;
     }
@@ -2699,10 +4522,62 @@ public class MainActivity extends Activity {
     }
 
     private void openNotificationAccessSettings() {
+        ComponentName component = new ComponentName(this, ReviveNotificationListener.class);
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                Intent detail = new Intent("android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS");
+                detail.putExtra("android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
+                        component.flattenToString());
+                startActivity(detail);
+                return;
+            } catch (Exception ignored) {
+            }
+        }
         try {
             startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
         } catch (Exception ex) {
             startActivity(new Intent(Settings.ACTION_SETTINGS));
+        }
+    }
+
+    private void maybeShowNotificationAccessHint(boolean force) {
+        if (Build.VERSION.SDK_INT < 21 || prefs == null || isNotificationAccessEnabled()) {
+            return;
+        }
+        if (!force && prefs.getBoolean(PREF_NOTIFY_ACCESS_HINT_SHOWN, false)) {
+            return;
+        }
+        if (notificationHintShowing || isFinishing()) {
+            return;
+        }
+        notificationHintShowing = true;
+        if (!force) {
+            prefs.edit().putBoolean(PREF_NOTIFY_ACCESS_HINT_SHOWN, true).apply();
+        }
+        try {
+            AlertDialog dialog = new AlertDialog.Builder(this)
+                    .setTitle("开启音乐信息读取")
+                    .setMessage("要稳定读取 QQ音乐、酷狗、网易云等系统播放器小卡里的歌名和歌手，需要开启“通知读取”权限。Android 不会像定位那样弹出允许/拒绝窗口，只能到系统设置里打开。")
+                    .setPositiveButton("去开启", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface dialog, int which) {
+                            notificationHintShowing = false;
+                            openNotificationAccessSettings();
+                        }
+                    })
+                    .setNegativeButton("稍后", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface dialog, int which) {
+                            notificationHintShowing = false;
+                        }
+                    })
+                    .create();
+            dialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(DialogInterface dialog) {
+                    notificationHintShowing = false;
+                }
+            });
+            dialog.show();
+        } catch (Exception ignored) {
+            notificationHintShowing = false;
         }
     }
 
@@ -2716,6 +4591,31 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_FULLSCREEN);
     }
 
+    private void installImmersiveGuard() {
+        getWindow().getDecorView().setOnSystemUiVisibilityChangeListener(
+                new View.OnSystemUiVisibilityChangeListener() {
+                    @Override public void onSystemUiVisibilityChange(int visibility) {
+                        if ((visibility & View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) == 0
+                                || (visibility & View.SYSTEM_UI_FLAG_FULLSCREEN) == 0) {
+                            restoreImmersiveSoon();
+                        }
+                    }
+                });
+    }
+
+    private void restoreImmersiveSoon() {
+        enterImmersive();
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { enterImmersive(); }
+        }, 160);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { enterImmersive(); }
+        }, 520);
+        handler.postDelayed(new Runnable() {
+            @Override public void run() { enterImmersive(); }
+        }, 1200);
+    }
+
     private void hideKeyboard() {
         try {
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
@@ -2725,20 +4625,22 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout panel(String title, String subtitle, int accent) {
+        boolean compact = compactLandscape();
         LinearLayout panel = column();
-        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.setPadding(compact ? dp(12) : dp(16), compact ? dp(9) : dp(14),
+                compact ? dp(12) : dp(16), compact ? dp(9) : dp(14));
         panel.setBackground(panelBg(accent));
         if (Build.VERSION.SDK_INT >= 21) {
             panel.setElevation(dp(5));
         }
-        TextView titleView = text(title, 21, Typeface.BOLD, TEXT);
+        TextView titleView = text(title, compact ? 18 : 21, Typeface.BOLD, TEXT);
         panel.addView(titleView, matchWrap());
         if (subtitle != null && subtitle.trim().length() > 0) {
-            TextView subView = text(subtitle, 13, Typeface.NORMAL, MUTED);
+            TextView subView = text(subtitle, compact ? 11 : 13, Typeface.NORMAL, MUTED);
             panel.addView(subView, matchWrap());
-            addPanelGap(panel, 8);
+            addPanelGap(panel, compact ? 5 : 8);
         } else {
-            addPanelGap(panel, 10);
+            addPanelGap(panel, compact ? 6 : 10);
         }
         return panel;
     }
@@ -2806,50 +4708,123 @@ public class MainActivity extends Activity {
     private EditText compactEdit(String hint) {
         EditText edit = new EditText(this);
         edit.setSingleLine(true);
-        edit.setTextSize(14);
+        edit.setTextSize(compactLandscape() ? 12 : 14);
         edit.setTextColor(TEXT);
         edit.setHintTextColor(MUTED);
         edit.setHint(hint);
-        edit.setPadding(dp(9), 0, dp(9), 0);
+        edit.setPadding(compactLandscape() ? dp(7) : dp(9), 0, compactLandscape() ? dp(7) : dp(9), 0);
         edit.setBackground(inputBg());
         allEdits.add(edit);
         return edit;
     }
 
     private Button actionButton(String label, int color) {
+        boolean compact = compactLandscape();
         Button b = new Button(this);
         b.setText(label);
         b.setAllCaps(false);
-        b.setTextSize(16);
+        b.setTextSize(compact ? 13 : 16);
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         b.setTextColor(Color.rgb(2, 12, 20));
-        b.setMinHeight(dp(44));
-        b.setPadding(dp(8), 0, dp(8), 0);
+        b.setMinHeight(compact ? dp(34) : dp(44));
+        b.setPadding(compact ? dp(6) : dp(8), 0, compact ? dp(6) : dp(8), 0);
         b.setBackground(buttonBg(color, true));
         allButtons.add(b);
         return b;
     }
 
-    private Button ghostButton(String label) {
+    private Button browserButton(String label) {
         Button b = new Button(this);
         b.setText(label);
         b.setAllCaps(false);
-        b.setTextSize(15);
+        b.setTextSize(getResources().getDisplayMetrics().widthPixels < dp(520) ? 13 : 15);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        b.setTextColor(Color.rgb(45, 55, 72));
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(4), 0, dp(4), 0);
+        b.setMinHeight(0);
+        b.setMinWidth(0);
+        b.setBackground(browserButtonBg(Color.WHITE, Color.rgb(229, 235, 243),
+                Color.rgb(247, 249, 252)));
+        return b;
+    }
+
+    private Button browserAccentButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(getResources().getDisplayMetrics().widthPixels < dp(520) ? 13 : 15);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        b.setTextColor(Color.WHITE);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(4), 0, dp(4), 0);
+        b.setMinHeight(0);
+        b.setMinWidth(0);
+        b.setBackground(browserButtonBg(Color.rgb(41, 197, 183),
+                Color.rgb(34, 178, 166), Color.rgb(55, 213, 199)));
+        return b;
+    }
+
+    private Button browserNavButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(20);
+        b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        b.setTextColor(Color.rgb(61, 73, 92));
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(0, 0, 0, dp(1));
+        b.setMinHeight(0);
+        b.setMinWidth(0);
+        b.setBackground(browserButtonBg(Color.WHITE, Color.rgb(226, 232, 240),
+                Color.rgb(242, 246, 250)));
+        return b;
+    }
+
+    private EditText browserEdit(String hint) {
+        EditText edit = new EditText(this);
+        edit.setSingleLine(true);
+        edit.setTextSize(getResources().getDisplayMetrics().widthPixels < dp(520) ? 13 : 15);
+        edit.setTextColor(Color.rgb(32, 41, 57));
+        edit.setHintTextColor(Color.rgb(126, 139, 158));
+        edit.setHint(hint);
+        edit.setPadding(dp(14), 0, dp(14), 0);
+        edit.setSelectAllOnFocus(false);
+        edit.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
+        edit.setBackground(browserButtonBg(Color.WHITE, Color.rgb(226, 232, 240),
+                Color.rgb(247, 250, 252)));
+        return edit;
+    }
+
+    private LinearLayout.LayoutParams browserNavParams(boolean first) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0,
+                getResources().getDisplayMetrics().widthPixels < dp(520) ? dp(44) : dp(48), 1f);
+        p.setMargins(first ? 0 : dp(6), 0, 0, 0);
+        return p;
+    }
+
+    private Button ghostButton(String label) {
+        boolean compact = compactLandscape();
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(compact ? 13 : 15);
         b.setTextColor(TEXT);
-        b.setMinHeight(dp(42));
-        b.setPadding(dp(8), 0, dp(8), 0);
+        b.setMinHeight(compact ? dp(32) : dp(42));
+        b.setPadding(compact ? dp(6) : dp(8), 0, compact ? dp(6) : dp(8), 0);
         b.setBackground(buttonBg(BLUE, false));
         allButtons.add(b);
         return b;
     }
 
     private Button tinyButton(String label, int color) {
+        boolean compact = compactLandscape();
         Button b = new Button(this);
         b.setText(label);
         b.setAllCaps(false);
-        b.setTextSize(14);
+        b.setTextSize(compact ? 12 : 14);
         b.setTextColor(Color.rgb(2, 12, 20));
-        b.setPadding(dp(4), 0, dp(4), 0);
+        b.setPadding(compact ? dp(3) : dp(4), 0, compact ? dp(3) : dp(4), 0);
         b.setBackground(buttonBg(color, true));
         allButtons.add(b);
         return b;
@@ -2979,6 +4954,46 @@ public class MainActivity extends Activity {
             drawable.setStroke(dp(1), Color.argb(150, Color.red(color), Color.green(color), Color.blue(color)));
         }
         drawable.setCornerRadius(dp(22));
+        return drawable;
+    }
+
+    private StateListDrawable browserButtonBg(int normal, int stroke, int pressed) {
+        StateListDrawable list = new StateListDrawable();
+        list.addState(new int[] { android.R.attr.state_pressed }, browserRoundBg(pressed, stroke));
+        list.addState(new int[] { android.R.attr.state_focused }, browserRoundBg(pressed, stroke));
+        list.addState(new int[] {}, browserRoundBg(normal, stroke));
+        return list;
+    }
+
+    private GradientDrawable browserDialogBg() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(Color.WHITE);
+        drawable.setCornerRadius(dp(18));
+        drawable.setStroke(dp(1), Color.rgb(226, 232, 240));
+        return drawable;
+    }
+
+    private StateListDrawable browserTabRowBg(boolean active) {
+        int normal = active ? Color.rgb(235, 252, 249) : Color.WHITE;
+        int pressed = active ? Color.rgb(220, 247, 243) : Color.rgb(246, 249, 252);
+        StateListDrawable list = new StateListDrawable();
+        list.addState(new int[] { android.R.attr.state_pressed }, browserTabRoundBg(pressed));
+        list.addState(new int[] {}, browserTabRoundBg(normal));
+        return list;
+    }
+
+    private GradientDrawable browserTabRoundBg(int fill) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fill);
+        drawable.setCornerRadius(dp(12));
+        return drawable;
+    }
+
+    private GradientDrawable browserRoundBg(int fill, int stroke) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fill);
+        drawable.setCornerRadius(dp(24));
+        drawable.setStroke(dp(1), stroke);
         return drawable;
     }
 
@@ -3431,6 +5446,49 @@ public class MainActivity extends Activity {
         }
     }
 
+    public static class SnapshotPreviewView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Rect src = new Rect();
+        private final Rect dst = new Rect();
+        private final Bitmap bitmap;
+
+        public SnapshotPreviewView(Context context, Bitmap bitmap) {
+            super(context);
+            this.bitmap = bitmap;
+            paint.setDither(true);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int w = getWidth();
+            int h = getHeight();
+            canvas.drawColor(Color.WHITE);
+            if (bitmap == null || bitmap.isRecycled() || w <= 0 || h <= 0) {
+                return;
+            }
+            int bw = bitmap.getWidth();
+            int bh = bitmap.getHeight();
+            if (bw <= 0 || bh <= 0) {
+                return;
+            }
+
+            float cardRatio = w / (float) h;
+            float bitmapRatio = bw / (float) bh;
+            if (bitmapRatio > cardRatio) {
+                int cropW = Math.max(1, Math.round(bh * cardRatio));
+                int left = Math.max(0, (bw - cropW) / 2);
+                src.set(left, 0, Math.min(bw, left + cropW), bh);
+            } else {
+                int cropH = Math.max(1, Math.round(bw / cardRatio));
+                int top = Math.max(0, (bh - cropH) / 2);
+                src.set(0, top, bw, Math.min(bh, top + cropH));
+            }
+            dst.set(0, 0, w, h);
+            canvas.drawBitmap(bitmap, src, dst, paint);
+        }
+    }
+
     public static class SeamlessMarqueeTextView extends TextView {
         private final Paint marqueePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private long startAt;
@@ -3446,11 +5504,15 @@ public class MainActivity extends Activity {
 
         @Override
         public void setText(CharSequence text, BufferType type) {
+            String next = text == null ? "" : text.toString();
+            boolean changed = !next.equals(value);
             super.setText(text, type);
-            value = text == null ? "" : text.toString();
-            startAt = SystemClock.uptimeMillis();
-            textWidth = 0f;
-            scrolling = false;
+            value = next;
+            if (changed) {
+                startAt = SystemClock.uptimeMillis();
+                textWidth = 0f;
+                scrolling = false;
+            }
             invalidate();
         }
 
@@ -3476,8 +5538,13 @@ public class MainActivity extends Activity {
             float speed = dpLocal(32) / 1000f;
             float offset = ((SystemClock.uptimeMillis() - startAt) * speed) % distance;
             float x = -offset;
-            canvas.drawText(text, x, baseline, marqueePaint);
-            canvas.drawText(text, x + distance, baseline, marqueePaint);
+            while (x > 0) {
+                x -= distance;
+            }
+            while (x < getWidth()) {
+                canvas.drawText(text, x, baseline, marqueePaint);
+                x += distance;
+            }
             postInvalidateDelayed(16);
         }
 
@@ -3766,7 +5833,17 @@ public class MainActivity extends Activity {
             new CityCandidate("拉萨", "拉萨 · 西藏", "lhasa", 29.6520, 91.1721),
             new CityCandidate("香港", "香港", "hongkong", 22.3193, 114.1694),
             new CityCandidate("澳门", "澳门", "macau", 22.1987, 113.5439),
-            new CityCandidate("台北", "台北 · 台湾", "taipei", 25.0330, 121.5654)
+            new CityCandidate("台北", "台北 · 台湾", "taipei", 25.0330, 121.5654),
+            new CityCandidate("纽约", "纽约 · 美国", "New York nyc", 40.7143, -74.0060),
+            new CityCandidate("伦敦", "伦敦 · 英国", "London", 51.5072, -0.1276),
+            new CityCandidate("巴黎", "巴黎 · 法国", "Paris", 48.8566, 2.3522),
+            new CityCandidate("东京", "东京 · 日本", "Tokyo", 35.6764, 139.6500),
+            new CityCandidate("洛杉矶", "洛杉矶 · 美国", "Los Angeles la", 34.0522, -118.2437),
+            new CityCandidate("旧金山", "旧金山 · 美国", "San Francisco", 37.7749, -122.4194),
+            new CityCandidate("新加坡", "新加坡", "Singapore", 1.3521, 103.8198),
+            new CityCandidate("首尔", "首尔 · 韩国", "Seoul", 37.5665, 126.9780),
+            new CityCandidate("曼谷", "曼谷 · 泰国", "Bangkok", 13.7563, 100.5018),
+            new CityCandidate("悉尼", "悉尼 · 澳大利亚", "Sydney", -33.8688, 151.2093)
     };
 
     public static class ReviveNotificationListener extends NotificationListenerService {
@@ -3798,7 +5875,14 @@ public class MainActivity extends Activity {
                     return;
                 }
                 latestNotifyPackage = sbn.getPackageName();
-                CharSequence title = notification.extras.getCharSequence(Notification.EXTRA_TITLE);
+                latestNotifyTitle = "";
+                latestNotifyArtist = "";
+                latestNotifyLyric = "";
+                latestNotifyText = "";
+                CharSequence title = firstText(
+                        notification.extras.getCharSequence(Notification.EXTRA_TITLE),
+                        notification.extras.getCharSequence("android.title.big"),
+                        notification.extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE));
                 if (title != null && title.length() > 0) {
                     latestNotifyTitle = title.toString();
                 }
@@ -3826,6 +5910,8 @@ public class MainActivity extends Activity {
             String[] values = new String[] {
                     textExtra(notification, Notification.EXTRA_TEXT),
                     textExtra(notification, Notification.EXTRA_SUB_TEXT),
+                    textExtra(notification, "android.textLines"),
+                    textExtra(notification, "android.title.big"),
                     textExtra(notification, Notification.EXTRA_BIG_TEXT),
                     textExtra(notification, Notification.EXTRA_SUMMARY_TEXT),
                     textExtra(notification, "android.infoText"),
@@ -3841,7 +5927,7 @@ public class MainActivity extends Activity {
                     continue;
                 }
                 value = value.trim();
-                if (value.length() == 0 || "酷狗音乐".equals(value)) {
+                if (value.length() == 0 || isPlayerName(value)) {
                     continue;
                 }
                 if (builder.indexOf(value) >= 0) {
@@ -3932,7 +6018,7 @@ public class MainActivity extends Activity {
         private static boolean looksLikeMediaNotification(StatusBarNotification sbn, Notification notification) {
             try {
                 if (isSystemNotificationPackage(sbn.getPackageName())) {
-                    return false;
+                    return notification.extras.getParcelable(Notification.EXTRA_MEDIA_SESSION) != null;
                 }
                 String ticker = notification.tickerText == null ? "" : notification.tickerText.toString().trim();
                 String lowerTicker = ticker.toLowerCase(Locale.US);
@@ -3949,8 +6035,7 @@ public class MainActivity extends Activity {
                 String pkg = sbn.getPackageName();
                 String text = (String.valueOf(notification.tickerText) + "\n"
                         + bestPlainNotifyText(notification)).toLowerCase(Locale.US);
-                if (pkg != null && (pkg.indexOf("music") >= 0 || pkg.indexOf("kugou") >= 0
-                        || pkg.indexOf("netease") >= 0 || pkg.indexOf("qqmusic") >= 0)) {
+                if (isKnownMusicPackage(pkg)) {
                     return true;
                 }
                 return text.indexOf("播放") >= 0 || text.indexOf("暂停") >= 0
@@ -4002,6 +6087,7 @@ public class MainActivity extends Activity {
                     textExtra(notification, Notification.EXTRA_TITLE),
                     textExtra(notification, Notification.EXTRA_TEXT),
                     textExtra(notification, Notification.EXTRA_SUB_TEXT),
+                    textExtra(notification, "android.title.big"),
                     textExtra(notification, Notification.EXTRA_BIG_TEXT),
                     textExtra(notification, Notification.EXTRA_SUMMARY_TEXT),
                     textLinesExtra(notification)
@@ -4016,6 +6102,35 @@ public class MainActivity extends Activity {
                 builder.append(values[i].trim());
             }
             return builder.toString();
+        }
+
+        private static CharSequence firstText(CharSequence... values) {
+            if (values == null) {
+                return null;
+            }
+            for (int i = 0; i < values.length; i++) {
+                if (values[i] != null && values[i].toString().trim().length() > 0) {
+                    return values[i];
+                }
+            }
+            return null;
+        }
+
+        private static boolean isPlayerName(String value) {
+            if (value == null) {
+                return true;
+            }
+            String text = value.trim();
+            if (text.length() == 0) {
+                return true;
+            }
+            String lower = text.toLowerCase(Locale.US);
+            return text.equals("酷狗音乐")
+                    || text.equals("QQ音乐")
+                    || text.equals("网易云音乐")
+                    || text.equals("酷我音乐")
+                    || lower.equals("qq music")
+                    || lower.equals("music");
         }
 
         private static String remoteViewsText(RemoteViews views) {
